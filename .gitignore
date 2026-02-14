@@ -10,9 +10,6 @@ main_old.lua
 .DS_Store
 Thumbs.db
 
-# User-specific config (users should copy config.json.example)
-scripts/config.json
-
 # Temporary files
 scripts/temp/
 *.tmp
