@@ -314,36 +314,6 @@ RegisterKeyBind(Key.F8, function()
     Collection.DumpState()
 end)
 
--- F9: Reset all checked locations (make all items re-pickable)
-RegisterKeyBind(Key.F9, function()
-    Logging.LogInfo("=== F9: Resetting all checked locations ===")
-    Collection.ResetCheckedLocations()
-    -- Also clear tracked items so scanner re-detects everything
-    State.TrackedItems = {}
-    Collection.DumpState()
-end)
-
--- F10: Archipelago connection status
-RegisterKeyBind(Key.F10, function()
-    Logging.LogInfo("=== F10: Archipelago Status ===")
-    Logging.LogInfo("  Status: " .. APClient.GetStatusString())
-    Logging.LogInfo("  Available: " .. tostring(APClient.IsAvailable()))
-    Logging.LogInfo("  Connected: " .. tostring(APClient.IsConnected()))
-    if APClient.PlayerSlot then
-        Logging.LogInfo(string.format("  Slot: %d, Team: %d", APClient.PlayerSlot, APClient.TeamNumber or -1))
-    end
-    Collection.DumpState()
-end)
-
--- F11: Reconnect to Archipelago server
-RegisterKeyBind(Key.F11, function()
-    Logging.LogInfo("=== F11: Reconnecting to AP ===")
-    APClient.Disconnect()
-    Config.Load()
-    APClient.Init(Config, State, Collection, ItemMapping)
-    APClient.Connect()
-end)
-
 -- ============================================================
 -- Export for external Archipelago client access
 -- ============================================================
