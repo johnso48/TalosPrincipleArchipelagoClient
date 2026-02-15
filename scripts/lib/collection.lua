@@ -320,4 +320,9 @@ function M.RefreshUI()
     RefreshTetrominoUI(nil)
 end
 
+-- Get granted items table for goal detection
+function M.GetGrantedItems()
+    return M.GrantedItems
+end
+
 return M

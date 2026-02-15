@@ -14,6 +14,7 @@ local Collection = require("lib.collection")
 local Config = require("lib.config")
 local ItemMapping = require("lib.item_mapping")
 local APClient = require("lib.ap_client")
+local GoalDetection = require("lib.goal_detection")
 
 Logging.LogInfo("==============================================")
 Logging.LogInfo("Archipelago Mod Loading...")
@@ -32,7 +33,8 @@ local State = {
     TrackedItems = {},
     CollectedThisSession = {},
     LevelTransitionCooldown = 0,
-    LastAddedTetrominoId = nil
+    LastAddedTetrominoId = nil,
+    ArrangerActive = false  -- true while player is using an arranger/gate
 }
 
 -- External callback for Archipelago integration
@@ -73,6 +75,18 @@ else
         Logging.LogWarning("Items can still be granted/revoked via debug keybinds (F5/F8)")
     end
 end
+
+-- ============================================================
+-- Initialize goal detection hooks
+-- Transcendence: hooks the ending cutscene sequence event
+-- Ascension: hooks BinkMediaPlayer:OpenUrl + RegisterSkippableCutsceneViewed
+-- Fallback: polls TalosSaveSubsystem:IsGameCompleted()
+-- ============================================================
+GoalDetection.OnGoalCompleted = function(goalName)
+    Logging.LogInfo(string.format("Goal completed: %s — sending to AP server", goalName))
+    APClient.SendGoalComplete()
+end
+GoalDetection.RegisterHooks()
 
 -- ============================================================
 -- Handle tetromino physical pickup event (location checked)
@@ -154,6 +168,7 @@ RegisterHook("/Script/Talos.TalosGameInstance:SetTalosSaveGameInstance", functio
     -- Pause loops during save game transition
     State.LevelTransitionCooldown = 50
     VisibilityApplied = {}
+    GoalDetection.ResetGoalState()
     -- Delay slightly to let the engine finish wiring up
     LoopAsync(200, function()
         State.CurrentProgress = nil
@@ -178,7 +193,33 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
     State.TrackedItems = {}
     State.LevelTransitionCooldown = 50
     VisibilityApplied = {}
+    GoalDetection.ResetGoalState()
 end)
+
+-- ============================================================
+-- Arranger (puzzle gate) detection — polling approach
+-- The native C++ functions OnStartUsingArranger/OnStopUsingArranger
+-- cannot be hooked via RegisterHook (ProcessInternal is null).
+-- Instead we poll AArranger::InteractingCharacter in the loops:
+-- when non-nil, someone is using an arranger and we must pause
+-- TMap manipulation to avoid crashing the arranger's UI reads.
+-- ============================================================
+local function IsAnyArrangerActive()
+    local arrangers = FindAllOf("Arranger")
+    if not arrangers then return false end
+    for _, arranger in ipairs(arrangers) do
+        -- InteractingCharacter is TWeakObjectPtr<ATalosCharacter>.
+        -- UE4SS exposes it as FWeakObjectPtr userdata — no :IsValid().
+        -- Use :Get() to dereference; returns the UObject or nil.
+        local ok, obj = pcall(function()
+            return arranger.InteractingCharacter:Get()
+        end)
+        if ok and obj ~= nil then
+            return true
+        end
+    end
+    return false
+end
 
 -- ============================================================
 -- Periodic polling loop — scan every 100ms for detection and tracking
@@ -208,11 +249,18 @@ LoopAsync(100, function()
         end
 
         if State.CurrentProgress and State.CurrentProgress:IsValid() then
-            -- Enforce: keep CollectedTetrominos in sync with Archipelago grants
-            Collection.EnforceCollectionState(State)
+            -- Poll arranger state — skip TMap manipulation while any arranger is in use
+            State.ArrangerActive = IsAnyArrangerActive()
+            if not State.ArrangerActive then
+                -- Enforce: keep CollectedTetrominos in sync with Archipelago grants
+                Collection.EnforceCollectionState(State)
+            end
             
             -- Scan for pickup events
             Scanner.ScanTetrominoItems(State, OnTetrominoCollected)
+            
+            -- Goal detection (both endings are hook-driven, this is a no-op keep-alive)
+            GoalDetection.CheckGoals(State)
         end
     end)
 
@@ -242,6 +290,11 @@ local VisibilityApplied = {}  -- id -> "visible" | "hidden"
 LoopAsync(10, function()
     -- Skip during level transitions to avoid accessing destroyed actors
     if State.LevelTransitionCooldown > 0 then
+        return false
+    end
+
+    -- Skip TMap manipulation while arranger is active
+    if State.ArrangerActive then
         return false
     end
 
