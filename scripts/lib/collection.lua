@@ -185,12 +185,17 @@ local function RefreshTetrominoUI(tetrominoId)
         -- synchronously causes "ArrayNum exceeds ArrayMax" crashes.
         local widgetRef = hudWidget
         LoopAsync(100, function()
-            pcall(function()
+            local ok3, err3 = pcall(function()
                 if widgetRef and widgetRef:IsValid() then
                     widgetRef:UpdateExplorationMode()
                     Logging.LogDebug("  UpdateExplorationMode() called successfully (deferred)")
+                else
+                    Logging.LogDebug("  widgetRef invalid during deferred UpdateExplorationMode, skipping")
                 end
             end)
+            if not ok3 then
+                Logging.LogDebug("  Deferred UpdateExplorationMode() error (level transition?): " .. tostring(err3))
+            end
             return true -- run once
         end)
     else

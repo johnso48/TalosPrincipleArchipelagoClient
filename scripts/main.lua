@@ -87,6 +87,11 @@ local function OnTetrominoCollected(tetrominoId)
     Collection.MarkLocationChecked(tetrominoId)
     State.CollectedThisSession[tetrominoId] = true
     
+    -- Clear visibility cache so the fast loop re-evaluates this item
+    if VisibilityApplied then
+        VisibilityApplied[tetrominoId] = nil
+    end
+    
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
     -- but the HUD won't update until we explicitly tell it to.
     LoopAsync(2000, function()
@@ -118,6 +123,9 @@ RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
     State.TrackedItems = {}
     State.LevelTransitionCooldown = 50
     
+    -- Clear visibility cache — actors are new after level transition
+    VisibilityApplied = {}
+    
     -- Log which save we're now tracking
     if State.CurrentProgress and State.CurrentProgress:IsValid() then
         local timePlayed = 0
@@ -143,6 +151,9 @@ end)
 -- ============================================================
 RegisterHook("/Script/Talos.TalosGameInstance:SetTalosSaveGameInstance", function(Context)
     Logging.LogInfo("Save game instance set on TalosGameInstance — refreshing progress")
+    -- Pause loops during save game transition
+    State.LevelTransitionCooldown = 50
+    VisibilityApplied = {}
     -- Delay slightly to let the engine finish wiring up
     LoopAsync(200, function()
         State.CurrentProgress = nil
@@ -166,6 +177,7 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
     State.CurrentProgress = nil
     State.TrackedItems = {}
     State.LevelTransitionCooldown = 50
+    VisibilityApplied = {}
 end)
 
 -- ============================================================
@@ -179,6 +191,16 @@ LoopAsync(100, function()
 
     -- Poll the Archipelago client (handles network I/O)
     APClient.Poll()
+
+    -- Decrement level transition cooldown — skip enforcement while
+    -- the world is (un)loading actors to avoid null dereferences.
+    if State.LevelTransitionCooldown > 0 then
+        State.LevelTransitionCooldown = State.LevelTransitionCooldown - 1
+        if State.LevelTransitionCooldown == 0 then
+            Logging.LogInfo("Level transition cooldown expired — resuming enforcement")
+        end
+        return false
+    end
 
     local ok, err = pcall(function()
         if not State.CurrentProgress or not State.CurrentProgress:IsValid() then
@@ -208,8 +230,21 @@ end)
 -- IsTetrominoCollected check returns false, allowing pickup.
 -- The enforce loop (100ms) re-adds granted items to TMap, so
 -- they remain usable in arrangers most of the time.
+--
+-- IMPORTANT: We track which items have already been set to their
+-- target state to avoid re-applying visibility every tick.
+-- Constantly toggling rendering properties causes DLSS temporal
+-- accumulation to corrupt, producing flickering artifacts
+-- (especially visible during rain/particle effects).
 -- ============================================================
+local VisibilityApplied = {}  -- id -> "visible" | "hidden"
+
 LoopAsync(10, function()
+    -- Skip during level transitions to avoid accessing destroyed actors
+    if State.LevelTransitionCooldown > 0 then
+        return false
+    end
+
     local ok, err = pcall(function()
         local items = FindAllOf("BP_TetrominoItem_C")
         if items then
@@ -225,12 +260,19 @@ LoopAsync(10, function()
                                     State.CurrentProgress.CollectedTetrominos:Remove(id)
                                 end)
                             end
-                            Visibility.SetTetrominoVisible(item)
+                            -- Only touch rendering state once
+                            if VisibilityApplied[id] ~= "visible" then
+                                Visibility.SetTetrominoVisible(item)
+                                VisibilityApplied[id] = "visible"
+                            end
                         elseif Collection.IsLocationChecked(id) and not Collection.IsGranted(id) then
                             -- Location was checked but item wasn't granted to us
                             -- (AP sent it to another player). Hide the actor so
                             -- it doesn't reappear, but do NOT add to TMap.
-                            Visibility.SetTetrominoHidden(item)
+                            if VisibilityApplied[id] ~= "hidden" then
+                                Visibility.SetTetrominoHidden(item)
+                                VisibilityApplied[id] = "hidden"
+                            end
                         end
                     end
                 end
@@ -244,6 +286,57 @@ LoopAsync(10, function()
 
     return false
 end)
+
+-- ============================================================
+-- Rain suppression loop — disable weather particles if configured
+-- The UDW (Ultra Dynamic Weather) rain system uses Niagara particles
+-- that can cause visual flickering with DLSS temporal accumulation.
+-- ============================================================
+if Config.disable_rain then
+    Logging.LogInfo("Rain suppression enabled — weather particles will be disabled")
+    LoopAsync(1000, function()
+        pcall(function()
+            local rainActors = FindAllOf("UDW_Rain_C")
+            if rainActors then
+                for _, rain in ipairs(rainActors) do
+                    if rain and rain:IsValid() then
+                        -- Kill spawn rate so no new particles emit
+                        pcall(function() rain.RainSpawnRate = 0 end)
+                        -- Disable splash and fog particles
+                        pcall(function() rain["Enable Fog Particles"] = false end)
+                        pcall(function() rain["Fog Particles Active"] = false end)
+                        pcall(function() rain["Splash Frequency"] = 0 end)
+                        -- Deactivate the Niagara particle component
+                        pcall(function()
+                            if rain["Rain Particles"] and rain["Rain Particles"]:IsValid() then
+                                rain["Rain Particles"]:Deactivate()
+                            end
+                        end)
+                    end
+                end
+            end
+            -- Also suppress snow if present (same DLSS flickering issue)
+            local snowActors = FindAllOf("UDW_Snow_C")
+            if snowActors then
+                for _, snow in ipairs(snowActors) do
+                    if snow and snow:IsValid() then
+                        pcall(function() snow.RainSpawnRate = 0 end)
+                        pcall(function() snow["Enable Fog Particles"] = false end)
+                        pcall(function() snow["Fog Particles Active"] = false end)
+                        pcall(function() snow["Splash Frequency"] = 0 end)
+                        -- Deactivate the Niagara particle component
+                        pcall(function()
+                            if snow["Rain Particles"] and snow["Rain Particles"]:IsValid() then
+                                snow["Rain Particles"]:Deactivate()
+                            end
+                        end)
+                    end
+                end
+            end
+        end)
+        return false -- keep running
+    end)
+end
 
 -- ============================================================
 -- Debug keybinds
@@ -342,6 +435,108 @@ RegisterKeyBind(Key.F8, function()
     Progress.FindProgressObject(State, true)
     Collection.RevokeItem(State, "DJ3")
     Collection.ResetLocation("DJ3")
+    Collection.DumpState()
+end)
+
+-- F9: Grant Connector items (MT1, ML1, MT2)
+RegisterKeyBind(Key.F9, function()
+    Logging.LogInfo("=== F9: Granting Connector items ===")
+    Progress.FindProgressObject(State, true)
+    local connectorItems = {"MT1", "ML1", "MT2"}
+    for _, id in ipairs(connectorItems) do
+        Collection.GrantItem(State, id)
+    end
+    Logging.LogInfo("Connector unlocked (MT1, ML1, MT2)")
+    Collection.DumpState()
+end)
+
+-- F10: Grant Hexahedron items (MT4, MT5, ML2) + Connector
+RegisterKeyBind(Key.F10, function()
+    Logging.LogInfo("=== F10: Granting Hexahedron + Connector items ===")
+    Progress.FindProgressObject(State, true)
+    local hexItems = {"MT1", "ML1", "MT2", "MT4", "MT5", "ML2"}
+    for _, id in ipairs(hexItems) do
+        Collection.GrantItem(State, id)
+    end
+    Logging.LogInfo("Hexahedron + Connector unlocked")
+    Collection.DumpState()
+end)
+
+-- F11: Grant all items needed for World A/B gates + Fans + Playback
+RegisterKeyBind(Key.F11, function()
+    Logging.LogInfo("=== F11: Granting World A/B gate items + Fans + Playback ===")
+    Progress.FindProgressObject(State, true)
+    local worldABItems = {
+        -- Connector
+        "MT1", "ML1", "MT2",
+        -- Hexahedron
+        "MT4", "MT5", "ML2",
+        -- World A1 gate (2 Green J, 1 Green Z)
+        "DJ1", "DJ2", "DZ1",
+        -- World A gate (1 Green J, 1 Green I, 1 Green L, 1 Green Z)
+        "DJ3", "DI1", "DL1", "DZ2",
+        -- World B gate (1 Green L, 2 Green T, 1 Green Z, 1 Green I)
+        "DL2", "DT1", "DT2", "DZ3", "DI2",
+        -- Fans (2 Yellow T, 1 Yellow L, 1 Yellow Z, 1 Yellow S)
+        "MT6", "MT7", "ML3", "MZ3", "MS1",
+        -- Playback (2 Yellow T, 1 Yellow J, 1 Yellow S, 1 Yellow Z)
+        "MT8", "MT9", "MJ1", "MS2", "MZ4"
+    }
+    for _, id in ipairs(worldABItems) do
+        Collection.GrantItem(State, id)
+    end
+    Logging.LogInfo("World A/B gates + Fans + Playback unlocked")
+    Collection.DumpState()
+end)
+
+-- F12: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
+RegisterKeyBind(Key.F12, function()
+    Logging.LogInfo("=== F12: Granting ALL gate items (full unlock) ===")
+    Progress.FindProgressObject(State, true)
+    local allGateItems = {
+        -- Connector
+        "MT1", "ML1", "MT2",
+        -- Hexahedron
+        "MT4", "MT5", "ML2",
+        -- Fans
+        "MT6", "MT7", "ML3", "MZ3", "MS1",
+        -- Playback
+        "MT8", "MT9", "MJ1", "MS2", "MZ4",
+        -- World A1 gate
+        "DJ1", "DJ2", "DZ1",
+        -- World A gate
+        "DJ3", "DI1", "DL1", "DZ2",
+        -- World B gate
+        "DL2", "DT1", "DT2", "DZ3", "DI2",
+        -- World C gate (2 Green T, 2 Green J, 1 Green L, 1 Green Z)
+        "DT3", "DT4", "DJ4", "DJ5", "DL3", "DZ4",
+        -- Additional A-world items mentioned
+        "MZ1", "MZ2", "NZ1", "NL1", "NL2", "NL3", "NZ2", "NL4", "NO1", "NT1",
+        -- Additional B-world items mentioned
+        "NL5", "NL6", "NT3", "NT4",
+        -- World B7 Golden pieces (platform unlock)
+        "MO1", "MI1",
+        -- World B7 Red pieces
+        "NJ1", "NI3",
+        -- World C1 Red pieces
+        "NZ4", "NJ2", "NI4", "NT5",
+        -- World C2 Red pieces
+        "NZ5", "NO2", "NT6", "NS2",
+        -- World C3 Red pieces
+        "NJ3", "NO3", "NZ6", "NT7",
+        -- World C4 Red pieces
+        "NT8", "NI5", "NS3", "NT9",
+        -- World C5 Red pieces
+        "NI6", "NO4", "NO5", "NT10",
+        -- World C6 Red pieces
+        "NS4", "NJ4", "NO6",
+        -- World C7 Red pieces
+        "NT11", "NO7", "NT12", "NL10"
+    }
+    for _, id in ipairs(allGateItems) do
+        Collection.GrantItem(State, id)
+    end
+    Logging.LogInfo("ALL gates + tools unlocked (through World C)")
     Collection.DumpState()
 end)
 

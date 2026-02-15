@@ -26,27 +26,48 @@ M.BASE_LOCATION_ID = 0x540000  -- 5505024
 -- All tetrominoes in the game (from BotPuzzleDatabase.csv)
 -- ============================================================
 local ALL_TETROMINOES = {
-    "MT1",  "DJ3",  "DJ1",  "DJ2",  "DZ1",
-    "ML1",  "DI1",  "ML2",  "DZ2",  "DL1",
-    "MT2",  "DZ3",  "MT3",  "NL1",  "MZ1",
-    "MT4",  "MZ2",  "MT5",  "DT2",  "DL2",
-    "DT1",  "NZ1",  "DI2",  "NL3",  "NZ2",
-    "NL2",  "DZ4",  "NO1",  "DL3",  "DT3",
-    "NT1",  "NL4",  "ML3",  "MZ3",  "MS1",
-    "MT6",  "MT7",  "MS2",  "MZ4",  "NL5",
-    "MT8",  "MT9",  "NT2",  "MJ1",  "NL6",
-    "NL8",  "DJ4",  "DT4",  "NT4",  "NL7",
-    "NT3",  "DJ5",  "NL9",  "NZ3",  "NS1",
-    "NI1",  "MT10", "ML4",  "NI2",  "MI1",
-    "NJ1",  "NI3",  "MO1",  "NT5",  "NI4",
-    "NJ2",  "NZ4",  "NS2",  "NZ5",  "NO2",
-    "NT6",  "NT7",  "NO3",  "NZ6",  "NJ3",
-    "NT9",  "NS3",  "NI5",  "NT8",  "NO4",
-    "NO5",  "NT10", "NI6",  "NO6",  "NS4",
-    "NJ4",  "NT12", "NT11", "NL10", "NO7",
-    -- Secret / Alternate ending
-    "EL1",  "ES1",  "ES3",  "EL2",  "EL3",
-    "ES2",  "EL4",  "EO1",  "ES4",
+    -- World A1 (7)
+    "DJ3",  "MT1",  "DZ1",  "DJ2",  "DJ1",  "ML1",  "DI1",
+    -- World A2 (3)
+    "ML2",  "DL1",  "DZ2",
+    -- World A3 (4)
+    "MT2",  "DZ3",  "NL1",  "MT3",
+    -- World A4 (4)
+    "MZ1",  "MZ2",  "MT4",  "MT5",
+    -- World A5 (5)
+    "NZ1",  "DI2",  "DT1",  "DT2",  "DL2",
+    -- World A6 (4)
+    "DZ4",  "NL2",  "NL3",  "NZ2",
+    -- World A7 (5)
+    "NL4",  "DL3",  "NT1",  "NO1",  "DT3",
+    -- World B1 (5)
+    "ML3",  "MZ3",  "MS1",  "MT6",  "MT7",
+    -- World B2 (4)
+    "NL5",  "MS2",  "MT8",  "MZ4",
+    -- World B3 (3)
+    "MT9",  "MJ1",  "NL6",
+    -- World B4 (6)
+    "NT3",  "NT4",  "DT4",  "DJ4",  "NL7",  "NL8",
+    -- World B5 (5)
+    "NI1",  "NL9",  "NS1",  "DJ5",  "NZ3",
+    -- World B6 (3)
+    "NI2",  "MT10", "ML4",
+    -- World B7 (4)
+    "NJ1",  "NI3",  "MO1",  "MI1",
+    -- World C1 (4)
+    "NZ4",  "NJ2",  "NI4",  "NT5",
+    -- World C2 (4)
+    "NZ5",  "NO2",  "NT6",  "NS2",
+    -- World C3 (4)
+    "NJ3",  "NO3",  "NZ6",  "NT7",
+    -- World C4 (4)
+    "NT8",  "NI5",  "NS3",  "NT9",
+    -- World C5 (4)
+    "NI6",  "NO4",  "NO5",  "NT10",
+    -- World C6 (3)
+    "NS4",  "NJ4",  "NO6",
+    -- World C7 (4)
+    "NT11", "NO7",  "NT12", "NL10",
 }
 
 -- ============================================================

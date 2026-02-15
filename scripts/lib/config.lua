@@ -14,6 +14,7 @@ M.slot_name = "Player1"
 M.password  = ""
 M.game      = "The Talos Principle Reawakened"
 M.offline_mode = false
+M.disable_rain = true
 
 -- ============================================================
 -- Minimal JSON parser (handles flat objects with string values)
@@ -94,6 +95,9 @@ function M.Load()
     if parsed.offline_mode then
         M.offline_mode = (parsed.offline_mode == "true" or parsed.offline_mode == "1")
     end
+    if parsed.disable_rain then
+        M.disable_rain = (parsed.disable_rain == "true" or parsed.disable_rain == "1")
+    end
 
     Logging.LogInfo(string.format("Config loaded from %s", configPath))
     Logging.LogInfo(string.format("  server    = %s", M.server))
@@ -102,6 +106,9 @@ function M.Load()
     Logging.LogInfo(string.format("  game      = %s", M.game))
     if M.offline_mode then
         Logging.LogInfo("  offline_mode = true (AP communication disabled)")
+    end
+    if M.disable_rain then
+        Logging.LogInfo("  disable_rain = true (weather effects suppressed)")
     end
 
     return M
