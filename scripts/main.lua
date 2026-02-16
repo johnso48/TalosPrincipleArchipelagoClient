@@ -15,6 +15,7 @@ local Config = require("lib.config")
 local ItemMapping = require("lib.item_mapping")
 local APClient = require("lib.ap_client")
 local GoalDetection = require("lib.goal_detection")
+local HUD = require("lib.hud")
 
 Logging.LogInfo("==============================================")
 Logging.LogInfo("Archipelago Mod Loading...")
@@ -93,6 +94,11 @@ end
 GoalDetection.RegisterHooks()
 
 -- ============================================================
+-- Initialize HUD notification overlay
+-- ============================================================
+HUD.Init()
+
+-- ============================================================
 -- Handle tetromino physical pickup event (location checked)
 -- This fires when the player walks into a tetromino in-world.
 -- It does NOT mean the item is in their inventory — Archipelago
@@ -143,6 +149,9 @@ RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
     
     -- Clear visibility cache — actors are new after level transition
     VisibilityApplied = {}
+
+    -- Re-initialize HUD widget (previous widget is invalid after level load)
+    HUD.Init()
     
     -- Log which save we're now tracking
     if State.CurrentProgress and State.CurrentProgress:IsValid() then

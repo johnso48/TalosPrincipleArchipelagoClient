@@ -14,6 +14,7 @@
 
 local Logging = require("lib.logging")
 local Config  = require("lib.config")
+local HUD     = require("lib.hud")
 
 local M = {}
 
@@ -185,6 +186,26 @@ local function OnSlotRefused(reasons)
     M.SlotConnected = false
 end
 
+--- Look up a player's display name by slot number.
+--- Falls back to "Player <slot>" if not found.
+local function GetPlayerName(slot)
+    if not slot or slot == 0 then return "Server" end
+    if ap then
+        -- Try the ap library helper first
+        local ok, name = pcall(function()
+            return ap:get_player_alias(slot)
+        end)
+        if ok and name and name ~= "" then return name end
+    end
+    -- Fallback to cached player list
+    if M.Players then
+        for _, p in ipairs(M.Players) do
+            if p.slot == slot then return p.name end
+        end
+    end
+    return "Player " .. tostring(slot)
+end
+
 local function OnItemsReceived(items)
     if not items then return end
 
@@ -201,6 +222,13 @@ local function OnItemsReceived(items)
             if GameState and Collection then
                 Collection.GrantItem(GameState, tetId)
                 grantedCount = grantedCount + 1
+            end
+
+            -- Show on-screen notification
+            local senderName = GetPlayerName(item.player)
+            local isSelf = (item.player == M.PlayerSlot)
+            if not isSelf then
+                HUD.ShowMessage(string.format("%s sent you %s", senderName, tetId))
             end
         else
             local prefix = ItemMapping.GetItemPrefix(item.item)
@@ -233,6 +261,8 @@ local function OnPrintJson(msg, extra)
         local text = ap:render_json(msg, AP.RenderFormat.TEXT)
         if text and text ~= "" then
             Logging.LogInfo("AP: " .. text)
+            -- Show server chat / hint messages on screen
+            HUD.ShowMessage(text, 6000)
         end
     end
 end
