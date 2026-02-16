@@ -335,7 +335,7 @@ local function DoConnect()
     -- lua-apclientpp requires ws:// (or wss://) in the URI
     -- Use ws:// for localhost and 127.0.0.1 addresses, wss:// otherwise
     if server and not server:match("^wss?://") then
-        if server:match("^(localhost|127%.0%.1)(:[0-9]+)?$") then
+        if server:match("^localhost") or server:match("^127%.0%.0%.1") then
             server = "ws://" .. server
         else
             server = "wss://" .. server
