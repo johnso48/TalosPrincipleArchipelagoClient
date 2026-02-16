@@ -1,6 +1,6 @@
 {
-    "server": "archipelago.gg:59764",
-    "slot_name": "Froddo_Talos",
+    "server": "localhost:38281",
+    "slot_name": "Player1",
     "password": "",
     "game": "The Talos Principle"
 }
