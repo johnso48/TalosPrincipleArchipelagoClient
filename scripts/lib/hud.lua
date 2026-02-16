@@ -22,7 +22,7 @@ local M = {}
 -- ============================================================
 local MAX_VISIBLE_LINES = 5       -- max messages shown at once
 local DEFAULT_DURATION  = 5000    -- ms before a message fades
-local TICK_INTERVAL     = 200     -- ms between cleanup ticks
+local TICK_INTERVAL     = 50     -- ms between cleanup ticks
 local VIEWPORT_Z_ORDER  = 99     -- widget layer priority
 
 -- ============================================================
@@ -31,10 +31,15 @@ local VIEWPORT_Z_ORDER  = 99     -- widget layer priority
 local widget    = nil   -- the UserWidget
 local textBlock = nil   -- the TextBlock (root of widget tree)
 local messages  = {}    -- array of {text=string, expireAt=number}
+local pendingQueue = {} -- buffered messages waiting to be promoted
 local tickCount = 0     -- monotonic counter incremented by TICK_INTERVAL
 local initialized = false
 local widgetCreationFailed = false  -- avoid retrying every tick
 local creationPending = false       -- guard against async race
+
+-- How many queued messages to promote into the visible list per tick.
+-- 1 = one message per TICK_INTERVAL (200 ms). Increase for faster drain.
+local DRAIN_PER_TICK = 1
 
 -- ============================================================
 -- Widget lifecycle
@@ -203,9 +208,22 @@ end
 -- Message management
 -- ============================================================
 
+--- Drain pending messages into the active list (rate-limited).
+local function DrainPendingQueue()
+    for _ = 1, DRAIN_PER_TICK do
+        if #pendingQueue == 0 then break end
+        local entry = table.remove(pendingQueue, 1)
+        entry.expireAt = tickCount + math.ceil(entry.duration / TICK_INTERVAL)
+        table.insert(messages, entry)
+    end
+end
+
 --- Rebuild the displayed text from the active message queue.
 local function RefreshDisplay()
     if not textBlock then return end
+
+    -- Promote buffered messages first
+    DrainPendingQueue()
 
     -- Remove expired messages
     local now = tickCount
@@ -268,7 +286,7 @@ function M.Init()
             tickCount = tickCount + 1
 
             -- Prune expired messages and refresh
-            if #messages > 0 then
+            if #messages > 0 or #pendingQueue > 0 then
                 -- Validate that our widget is still alive
                 if widget then
                     local alive = false
@@ -299,27 +317,27 @@ function M.ShowMessage(text, duration)
     if not text or text == "" then return end
 
     duration = duration or DEFAULT_DURATION
-    local expireTick = tickCount + math.ceil(duration / TICK_INTERVAL)
 
-    table.insert(messages, {
+    -- Buffer into the pending queue; the tick loop will drain it.
+    table.insert(pendingQueue, {
         text = text,
-        expireAt = expireTick
+        duration = duration,
+        expireAt = 0  -- set when promoted
     })
 
-    Logging.LogDebug(string.format("HUD: Queued message (expires tick %d): %s", expireTick, text))
+    Logging.LogDebug(string.format("HUD: Buffered message (%d pending): %s", #pendingQueue, text))
 
-    -- Ensure widget exists, then refresh
+    -- Ensure widget exists (don't force a RefreshDisplay here;
+    -- the tick loop handles draining at a safe rate).
     if not widget and not widgetCreationFailed then
         RequestCreateWidget()
     end
-    ExecuteInGameThread(function()
-        RefreshDisplay()
-    end)
 end
 
 --- Remove all messages and clear the display.
 function M.Clear()
     messages = {}
+    pendingQueue = {}
     if textBlock then
         ExecuteInGameThread(function()
             pcall(function()
