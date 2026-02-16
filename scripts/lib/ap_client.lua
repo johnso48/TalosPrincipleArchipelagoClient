@@ -121,27 +121,52 @@ local function OnSlotConnected(slot_data)
         end
     end
 
-    -- Log checked/missing locations
-    local checked = ap.checked_locations or {}
-    local missing = ap.missing_locations or {}
-    Logging.LogInfo(string.format("AP: %d checked, %d missing locations",
-        #checked, #missing))
+    -- Log checked/missing locations from the server
+    local serverChecked = ap.checked_locations or {}
+    local serverMissing = ap.missing_locations or {}
+    Logging.LogInfo(string.format("AP: %d checked, %d missing locations (from server)",
+        #serverChecked, #serverMissing))
 
-    -- Sync: send all locations we've already checked locally
-    local localChecked = Collection.GetCheckedLocations()
-    if #localChecked > 0 then
-        local locationIds = {}
-        for _, tetId in ipairs(localChecked) do
-            local locId = ItemMapping.GetLocationId(tetId)
-            if locId then
-                table.insert(locationIds, locId)
-            end
-        end
-        if #locationIds > 0 then
-            Logging.LogInfo(string.format("AP: Sending %d locally checked locations to server", #locationIds))
-            ap:LocationChecks(locationIds)
+    -- Restore checked locations from the AP server.
+    -- The server tracks which location IDs have been checked — this is
+    -- the source of truth. Convert back to tetromino IDs.
+    local restoredCount = 0
+    for _, locId in ipairs(serverChecked) do
+        local tetId = ItemMapping.GetLocationName(locId)
+        if tetId then
+            Collection.MarkLocationChecked(tetId)
+            restoredCount = restoredCount + 1
         end
     end
+    if restoredCount > 0 then
+        Logging.LogInfo(string.format("AP: Restored %d checked locations from server", restoredCount))
+    end
+
+    -- Also send any locally-checked locations the server doesn't know about yet
+    -- (e.g. picked up this session before reconnecting)
+    local localChecked = Collection.GetCheckedLocations()
+    if type(localChecked) == "table" then
+        local toSend = {}
+        -- Build a set of server-checked IDs for fast lookup
+        local serverCheckedSet = {}
+        for _, locId in ipairs(serverChecked) do
+            serverCheckedSet[locId] = true
+        end
+        for _, tetId in ipairs(localChecked) do
+            local locId = ItemMapping.GetLocationId(tetId)
+            if locId and not serverCheckedSet[locId] then
+                table.insert(toSend, locId)
+            end
+        end
+        if #toSend > 0 then
+            Logging.LogInfo(string.format("AP: Sending %d locally checked locations to server", #toSend))
+            ap:LocationChecks(toSend)
+        end
+    end
+
+    -- Mark as synced — items_received fires separately but we know the connection is live.
+    Collection.APSynced = true
+    Logging.LogInfo("AP: APSynced = true — enforcement is now enabled")
 
     -- Send playing status
     ap:StatusUpdate(20) -- CLIENT_PLAYING
@@ -158,19 +183,30 @@ local function OnItemsReceived(items)
 
     Logging.LogInfo(string.format("AP: Received %d items", #items))
 
+    local grantedCount = 0
+    local unknownCount = 0
     for _, item in ipairs(items) do
         local tetId = ItemMapping.GetItemName(item.item)
         if tetId then
-            Logging.LogInfo(string.format("AP: Item received: %s (id=%d from player %d)",
+            Logging.LogDebug(string.format("AP: Item received: %s (id=%d from player %d)",
                 tetId, item.item, item.player or 0))
             -- Grant individually (additive) — never wipe previous grants
             if GameState and Collection then
                 Collection.GrantItem(GameState, tetId)
+                grantedCount = grantedCount + 1
             end
         else
             Logging.LogWarning(string.format("AP: Unknown item id %d from player %d",
                 item.item, item.player or 0))
+            unknownCount = unknownCount + 1
         end
+    end
+
+    Logging.LogInfo(string.format("AP: Processed items — %d granted, %d unknown", grantedCount, unknownCount))
+
+    -- Ensure APSynced is set
+    if Collection then
+        Collection.APSynced = true
     end
 end
 
@@ -254,8 +290,13 @@ local function DoConnect()
     local server = Config.server
     -- Ensure the server address has a WebSocket scheme prefix
     -- lua-apclientpp requires ws:// (or wss://) in the URI
+    -- Use ws:// for localhost and 127.0.0.1 addresses, wss:// otherwise
     if server and not server:match("^wss?://") then
-        server = "ws://" .. server
+        if server:match("^(localhost|127%.0%.1)(:[0-9]+)?$") then
+            server = "ws://" .. server
+        else
+            server = "wss://" .. server
+        end
     end
     Logging.LogInfo(string.format("AP: Creating AP client on poll coroutine for %s...", server))
 

@@ -44,11 +44,15 @@ OnLocationCheckedCallback = nil
 -- ============================================================
 -- Initialize Archipelago client
 -- ============================================================
+
 local apAvailable = false
 if Config.offline_mode then
     Logging.LogInfo("Offline mode enabled — AP communication disabled")
     Logging.LogInfo("Items can be granted/revoked via debug keybinds (F5/F8)")
     Logging.LogInfo("Pickups will log item names and location IDs without sending to server")
+    
+    -- In offline mode, enforcement can start immediately
+    Collection.APSynced = true
     
     -- Wire a local-only callback that logs and self-grants
     OnLocationCheckedCallback = function(tetrominoId)
@@ -198,27 +202,32 @@ end)
 
 -- ============================================================
 -- Arranger (puzzle gate) detection — polling approach
--- The native C++ functions OnStartUsingArranger/OnStopUsingArranger
--- cannot be hooked via RegisterHook (ProcessInternal is null).
--- Instead we poll AArranger::InteractingCharacter in the loops:
--- when non-nil, someone is using an arranger and we must pause
--- TMap manipulation to avoid crashing the arranger's UI reads.
+-- Uses AArranger::bIsEditingPuzzle (bool at 0x0598) which is true
+-- while the player is actively using the arranger's puzzle grid.
+-- Previous approach using InteractingCharacter (TWeakObjectPtr) was
+-- unreliable — :Get() returned stale non-nil values, permanently
+-- blocking enforcement. bIsEditingPuzzle is a simple bool that
+-- reads cleanly.
 -- ============================================================
+local previousArrangerActive = false
+
 local function IsAnyArrangerActive()
-    local arrangers = FindAllOf("Arranger")
-    if not arrangers then return false end
-    for _, arranger in ipairs(arrangers) do
-        -- InteractingCharacter is TWeakObjectPtr<ATalosCharacter>.
-        -- UE4SS exposes it as FWeakObjectPtr userdata — no :IsValid().
-        -- Use :Get() to dereference; returns the UObject or nil.
-        local ok, obj = pcall(function()
-            return arranger.InteractingCharacter:Get()
-        end)
-        if ok and obj ~= nil then
-            return true
+    local ok, result = pcall(function()
+        local arrangers = FindAllOf("Arranger")
+        if not arrangers then return false end
+        for _, arranger in ipairs(arrangers) do
+            local editOk, editing = pcall(function()
+                return arranger.bIsEditingPuzzle
+            end)
+            if editOk and editing then
+                return true
+            end
         end
-    end
-    return false
+        return false
+    end)
+    -- If the entire check errors, default to false (don't block enforcement)
+    if not ok then return false end
+    return result
 end
 
 -- ============================================================
@@ -227,11 +236,30 @@ end
 -- CollectedTetrominos so they remain collectable).
 -- ============================================================
 local LoopCount = 0
+local AP_SYNC_TIMEOUT = 300  -- 30 seconds (300 * 100ms) before enabling enforcement anyway
+
 LoopAsync(100, function()
     LoopCount = LoopCount + 1
 
     -- Poll the Archipelago client (handles network I/O)
     APClient.Poll()
+
+    -- AP sync timeout: if AP hasn't synced after 30s, enable enforcement
+    -- using whatever grants we have (from disk cache or empty)
+    if not Collection.APSynced and LoopCount >= AP_SYNC_TIMEOUT then
+        local grantCount = 0
+        for _ in pairs(Collection.GrantedItems) do grantCount = grantCount + 1 end
+        Logging.LogWarning(string.format(
+            "AP sync timeout (%ds) — enabling enforcement with %d cached grants",
+            AP_SYNC_TIMEOUT / 10, grantCount))
+        Collection.APSynced = true
+    end
+
+    -- Log AP connection status every 5 seconds until synced
+    if not Collection.APSynced and LoopCount % 50 == 0 then
+        Logging.LogInfo(string.format("AP status: %s (synced=%s, tick=%d/%d)",
+            APClient.GetStatusString(), tostring(Collection.APSynced), LoopCount, AP_SYNC_TIMEOUT))
+    end
 
     -- Decrement level transition cooldown — skip enforcement while
     -- the world is (un)loading actors to avoid null dereferences.
@@ -251,6 +279,10 @@ LoopAsync(100, function()
         if State.CurrentProgress and State.CurrentProgress:IsValid() then
             -- Poll arranger state — skip TMap manipulation while any arranger is in use
             State.ArrangerActive = IsAnyArrangerActive()
+            if State.ArrangerActive ~= previousArrangerActive then
+                Logging.LogInfo(string.format("Arranger state changed: %s", tostring(State.ArrangerActive)))
+                previousArrangerActive = State.ArrangerActive
+            end
             if not State.ArrangerActive then
                 -- Enforce: keep CollectedTetrominos in sync with Archipelago grants
                 Collection.EnforceCollectionState(State)
@@ -272,7 +304,7 @@ LoopAsync(100, function()
 end)
 
 -- ============================================================
--- Fast visibility loop — every 10ms manage item visibility
+-- Fast visibility loop — every 5ms manage item visibility
 -- Items that should be collectable: force visible + collision
 -- Also temporarily removes them from TMap so the game's
 -- IsTetrominoCollected check returns false, allowing pickup.
@@ -287,7 +319,7 @@ end)
 -- ============================================================
 local VisibilityApplied = {}  -- id -> "visible" | "hidden"
 
-LoopAsync(10, function()
+LoopAsync(5, function()
     -- Skip during level transitions to avoid accessing destroyed actors
     if State.LevelTransitionCooldown > 0 then
         return false
@@ -347,46 +379,94 @@ end)
 -- ============================================================
 if Config.disable_rain then
     Logging.LogInfo("Rain suppression enabled — weather particles will be disabled")
+    local rainSuppressCount = 0
     LoopAsync(1000, function()
+        rainSuppressCount = rainSuppressCount + 1
+        local rainFound, snowFound = 0, 0
+
+        -- Suppress rain
         pcall(function()
             local rainActors = FindAllOf("UDW_Rain_C")
             if rainActors then
+                rainFound = #rainActors
                 for _, rain in ipairs(rainActors) do
                     if rain and rain:IsValid() then
-                        -- Kill spawn rate so no new particles emit
-                        pcall(function() rain.RainSpawnRate = 0 end)
-                        -- Disable splash and fog particles
-                        pcall(function() rain["Enable Fog Particles"] = false end)
-                        pcall(function() rain["Fog Particles Active"] = false end)
-                        pcall(function() rain["Splash Frequency"] = 0 end)
-                        -- Deactivate the Niagara particle component
-                        pcall(function()
+                        local ok1, e1 = pcall(function() rain:SetActorHiddenInGame(true) end)
+                        local ok2, e2 = pcall(function() rain:SetActorTickEnabled(false) end)
+                        local ok3, e3 = pcall(function() rain.RainSpawnRate = 0 end)
+                        local ok4, e4 = pcall(function() rain["Splash Frequency"] = 0 end)
+                        local ok5, e5 = pcall(function() rain["Enable Fog Particles"] = false end)
+                        local ok6, e6 = pcall(function() rain["Fog Particles Active"] = false end)
+                        local ok7, e7 = pcall(function()
                             if rain["Rain Particles"] and rain["Rain Particles"]:IsValid() then
                                 rain["Rain Particles"]:Deactivate()
+                                rain["Rain Particles"]:SetVisibility(false, true)
                             end
                         end)
+                        -- Log failures on first tick
+                        if rainSuppressCount <= 2 then
+                            Logging.LogInfo(string.format(
+                                "Rain suppress results: Hidden=%s(%s) Tick=%s(%s) Spawn=%s(%s) Splash=%s(%s) Fog=%s(%s) FogAct=%s(%s) Niagara=%s(%s)",
+                                tostring(ok1), tostring(e1), tostring(ok2), tostring(e2),
+                                tostring(ok3), tostring(e3), tostring(ok4), tostring(e4),
+                                tostring(ok5), tostring(e5), tostring(ok6), tostring(e6),
+                                tostring(ok7), tostring(e7)))
+                            -- Also verify if properties actually changed
+                            pcall(function()
+                                Logging.LogInfo(string.format(
+                                    "Rain verify: bHidden=%s RainSpawnRate=%s SplashFreq=%s EnableFog=%s FogActive=%s",
+                                    tostring(rain.bHidden),
+                                    tostring(rain.RainSpawnRate),
+                                    tostring(rain["Splash Frequency"]),
+                                    tostring(rain["Enable Fog Particles"]),
+                                    tostring(rain["Fog Particles Active"])))
+                            end)
+                            pcall(function()
+                                local rp = rain["Rain Particles"]
+                                if rp and rp:IsValid() then
+                                    Logging.LogInfo(string.format(
+                                        "Rain Niagara: IsActive=%s bVisible=%s",
+                                        tostring(rp:IsActive()), tostring(rp:IsVisible())))
+                                else
+                                    Logging.LogInfo("Rain Niagara: component nil or invalid")
+                                end
+                            end)
+                        end
                     end
                 end
             end
-            -- Also suppress snow if present (same DLSS flickering issue)
+        end)
+
+        -- Suppress snow
+        pcall(function()
             local snowActors = FindAllOf("UDW_Snow_C")
             if snowActors then
+                snowFound = #snowActors
                 for _, snow in ipairs(snowActors) do
                     if snow and snow:IsValid() then
+                        pcall(function() snow:SetActorHiddenInGame(true) end)
+                        pcall(function() snow:SetActorTickEnabled(false) end)
                         pcall(function() snow.RainSpawnRate = 0 end)
+                        pcall(function() snow["Splash Frequency"] = 0 end)
                         pcall(function() snow["Enable Fog Particles"] = false end)
                         pcall(function() snow["Fog Particles Active"] = false end)
-                        pcall(function() snow["Splash Frequency"] = 0 end)
-                        -- Deactivate the Niagara particle component
                         pcall(function()
                             if snow["Rain Particles"] and snow["Rain Particles"]:IsValid() then
                                 snow["Rain Particles"]:Deactivate()
+                                snow["Rain Particles"]:SetVisibility(false, true)
                             end
                         end)
                     end
                 end
             end
         end)
+
+        -- Log diagnostics periodically (every 30s)
+        if rainSuppressCount % 30 == 1 then
+            Logging.LogDebug(string.format("Rain suppression tick %d: rain=%d snow=%d actors found",
+                rainSuppressCount, rainFound, snowFound))
+        end
+
         return false -- keep running
     end)
 end
@@ -394,15 +474,6 @@ end
 -- ============================================================
 -- Debug keybinds
 -- ============================================================
-
--- F5: Grant DJ3 via Archipelago (simulates receiving item from multiworld)
-RegisterKeyBind(Key.F5, function()
-    Logging.LogInfo("=== F5: Granting DJ3 (Archipelago grant) ===")
-    Progress.FindProgressObject(State, true)
-    Collection.GrantItem(State, "DJ3")
-    Collection.DumpState()
-    Progress.DumpSaveFileContents(State)
-end)
 
 -- F6: Dump full state (collection state + inventory + progress)
 RegisterKeyBind(Key.F6, function()
@@ -438,113 +509,9 @@ RegisterKeyBind(Key.F6, function()
     Progress.DumpSaveFileContents(State)
 end)
 
--- F7: Inspect Capsule collision on all items + collection state
-RegisterKeyBind(Key.F7, function()
-    Logging.LogInfo("=== F7: Item state inspection ===")
-    
-    local items = FindAllOf("BP_TetrominoItem_C")
-    if not items then
-        Logging.LogInfo("No tetromino items found")
-        return
-    end
-    
-    Logging.LogInfo(string.format("Found %d tetromino items", #items))
-    
-    for i, item in ipairs(items) do
-        if item and item:IsValid() then
-            local id = TetrominoUtils.GetTetrominoId(item)
-            local collectable = id and Collection.ShouldBeCollectable(id) or false
-            local granted = id and Collection.IsGranted(id) or false
-            local checked = id and Collection.IsLocationChecked(id) or false
-            
-            Logging.LogInfo(string.format("\n--- %s --- collectable=%s granted=%s checked=%s",
-                id, tostring(collectable), tostring(granted), tostring(checked)))
-            
-            pcall(function()
-                Logging.LogInfo(string.format("  bHidden=%s bActorEnableCollision=%s bIsAnimating=%s",
-                    tostring(item.bHidden), tostring(item.bActorEnableCollision), tostring(item.bIsAnimating)))
-            end)
-            
-            pcall(function()
-                if item.Capsule and item.Capsule:IsValid() then
-                    Logging.LogInfo(string.format("  Capsule: CollisionEnabled=%s bGenerateOverlapEvents=%s",
-                        tostring(item.Capsule.CollisionEnabled), tostring(item.Capsule.bGenerateOverlapEvents)))
-                else
-                    Logging.LogInfo("  Capsule: nil or invalid")
-                end
-            end)
-            
-            if i >= 5 then
-                Logging.LogInfo("\n... (showing first 5 items only)")
-                break
-            end
-        end
-    end
-end)
-
--- F8: Revoke DJ3 (simulates losing item, makes it re-appear and re-collectable)
+-- F8: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
 RegisterKeyBind(Key.F8, function()
-    Logging.LogInfo("=== F8: Revoking DJ3 + resetting location ===")
-    Progress.FindProgressObject(State, true)
-    Collection.RevokeItem(State, "DJ3")
-    Collection.ResetLocation("DJ3")
-    Collection.DumpState()
-end)
-
--- F9: Grant Connector items (MT1, ML1, MT2)
-RegisterKeyBind(Key.F9, function()
-    Logging.LogInfo("=== F9: Granting Connector items ===")
-    Progress.FindProgressObject(State, true)
-    local connectorItems = {"MT1", "ML1", "MT2"}
-    for _, id in ipairs(connectorItems) do
-        Collection.GrantItem(State, id)
-    end
-    Logging.LogInfo("Connector unlocked (MT1, ML1, MT2)")
-    Collection.DumpState()
-end)
-
--- F10: Grant Hexahedron items (MT4, MT5, ML2) + Connector
-RegisterKeyBind(Key.F10, function()
-    Logging.LogInfo("=== F10: Granting Hexahedron + Connector items ===")
-    Progress.FindProgressObject(State, true)
-    local hexItems = {"MT1", "ML1", "MT2", "MT4", "MT5", "ML2"}
-    for _, id in ipairs(hexItems) do
-        Collection.GrantItem(State, id)
-    end
-    Logging.LogInfo("Hexahedron + Connector unlocked")
-    Collection.DumpState()
-end)
-
--- F11: Grant all items needed for World A/B gates + Fans + Playback
-RegisterKeyBind(Key.F11, function()
-    Logging.LogInfo("=== F11: Granting World A/B gate items + Fans + Playback ===")
-    Progress.FindProgressObject(State, true)
-    local worldABItems = {
-        -- Connector
-        "MT1", "ML1", "MT2",
-        -- Hexahedron
-        "MT4", "MT5", "ML2",
-        -- World A1 gate (2 Green J, 1 Green Z)
-        "DJ1", "DJ2", "DZ1",
-        -- World A gate (1 Green J, 1 Green I, 1 Green L, 1 Green Z)
-        "DJ3", "DI1", "DL1", "DZ2",
-        -- World B gate (1 Green L, 2 Green T, 1 Green Z, 1 Green I)
-        "DL2", "DT1", "DT2", "DZ3", "DI2",
-        -- Fans (2 Yellow T, 1 Yellow L, 1 Yellow Z, 1 Yellow S)
-        "MT6", "MT7", "ML3", "MZ3", "MS1",
-        -- Playback (2 Yellow T, 1 Yellow J, 1 Yellow S, 1 Yellow Z)
-        "MT8", "MT9", "MJ1", "MS2", "MZ4"
-    }
-    for _, id in ipairs(worldABItems) do
-        Collection.GrantItem(State, id)
-    end
-    Logging.LogInfo("World A/B gates + Fans + Playback unlocked")
-    Collection.DumpState()
-end)
-
--- F12: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
-RegisterKeyBind(Key.F12, function()
-    Logging.LogInfo("=== F12: Granting ALL gate items (full unlock) ===")
+    Logging.LogInfo("=== F8: Granting ALL gate items (full unlock) ===")
     Progress.FindProgressObject(State, true)
     local allGateItems = {
         -- Connector

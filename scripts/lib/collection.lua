@@ -36,6 +36,11 @@ M.GrantedItems = {}
 -- Cleared on level transition or session restart.
 M.CheckedLocations = {}
 
+-- Whether AP has synced items at least once this session.
+-- EnforceCollectionState is BLOCKED until this is true, so we
+-- don't wipe the player's TMap before AP can repopulate grants.
+M.APSynced = false
+
 -- ============================================================
 -- Collection state enforcement
 -- ============================================================
@@ -50,6 +55,13 @@ M.CheckedLocations = {}
 -- OnBeginOverlap's IsTetrominoCollected check allows pickup.
 function M.EnforceCollectionState(state)
     if not state.CurrentProgress or not state.CurrentProgress:IsValid() then
+        return
+    end
+
+    -- Block enforcement until AP has synced items (or timeout).
+    -- Without this, we'd wipe the TMap on every mod load before
+    -- the AP server has a chance to repopulate GrantedItems.
+    if not M.APSynced then
         return
     end
 
@@ -170,7 +182,7 @@ local function RefreshTetrominoUI(tetrominoId)
     if hudWidget then
         local ok2, err2 = pcall(function()
             if hudWidget.ArrangerInfo then
-                hudWidget.ArrangerInfo:UpdateInventory()
+                -- hudWidget.ArrangerInfo:UpdateInventory()
                 Logging.LogDebug("  ArrangerInfo:UpdateInventory() called successfully")
             else
                 Logging.LogDebug("  hudWidget.ArrangerInfo is nil")
@@ -233,8 +245,11 @@ end
 -- The visibility loop will temporarily remove it from TMap when
 -- the physical actor is in the current level, allowing pickup.
 function M.GrantItem(state, tetrominoId)
+    local wasNew = not M.GrantedItems[tetrominoId]
     M.GrantedItems[tetrominoId] = true
-    Logging.LogInfo(string.format("Item granted: %s", tetrominoId))
+    if wasNew then
+        Logging.LogInfo(string.format("Item granted: %s", tetrominoId))
+    end
 
     -- Add to TMap for immediate usability
     if state.CurrentProgress and state.CurrentProgress:IsValid() then
@@ -243,7 +258,9 @@ function M.GrantItem(state, tetrominoId)
         end)
     end
 
-    RefreshTetrominoUI(tetrominoId)
+    if wasNew then
+        RefreshTetrominoUI(tetrominoId)
+    end
 end
 
 -- Revoke an item — remove from GrantedItems and TMap.
@@ -258,6 +275,7 @@ function M.RevokeItem(state, tetrominoId)
             state.CurrentProgress.CollectedTetrominos:Remove(tetrominoId)
         end)
     end
+
 end
 
 -- Bulk grant — set a list of granted items (e.g. on Archipelago connect/sync)
