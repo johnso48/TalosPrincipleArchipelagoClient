@@ -38,7 +38,7 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
        "server": "archipelago.gg:38281",
        "slot_name": "slotName",
        "password": "",
-       "game": "The Talos Principle Reawakened"
+       "game": "The Talos Principle"
      }
      ```
 
@@ -51,11 +51,9 @@ Edit `scripts/config.json`:
 - **server**: AP server address and port (e.g. `archipelago.gg:38281`)
 - **slot_name**: Your player/slot name in the multiworld
 - **password**: Server password (leave empty `""` if none)
-- **game**: Game name (should be `"The Talos Principle Reawakened"`)
+- **game**: Game name (should be `"The Talos Principle"`)
 
 ## Debug Keybinds
 
-- **F5**: Grant DJ3 (simulate receiving item from AP)
 - **F6**: Dump full state (collection, inventory, progress)
-- **F7**: Inspect all items (visibility, collision, grant status)
-- **F8**: Revoke DJ3 (make it re-collectable)
+- **F8**: Grants all tetrominos
