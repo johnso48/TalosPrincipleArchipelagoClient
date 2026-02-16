@@ -4,8 +4,12 @@
 -- Tracks completion of Archipelago goals by hooking the actual
 -- in-game ending triggers:
 --
---   Transcendence: Fires when the Ending_Transcendence level
---     sequence plays (SequenceEvent_0 on the director BP).
+--   Transcendence: Detected via three strategies (first wins):
+--     1. RegisterHook on SequenceEvent_0 (if class is loaded).
+--     2. NotifyOnNewObject fires when the director BP class is
+--        constructed (i.e. the ending package streams in).
+--     3. Polling via StaticFindObject for the LevelSequence
+--        /Game/Cinematics/Sequences/Endings/Ending_Transcendence.
 --     This is the cutscene that plays after collecting all
 --     tetrominos and opening the World C door.
 --
@@ -38,7 +42,7 @@ function M.RegisterHooks()
     -- SequenceEvent_0 fires when the cutscene actually starts.
     -- ---------------------------------------------------------
     local transcendenceHooked = pcall(function()
-        RegisterHook("/Game/Maps/Talos/Endings/Ending_Transcendence/Ending_Transcendence_DirectorBP.Ending_Transcendence_DirectorBP_C:SequenceEvent_0", function(Context)
+        RegisterHook("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence_DirectorBP_C:SequenceEvent_0", function(Context)
             if M.GoalCompleted then return end
             
             Logging.LogInfo("======================================")
@@ -58,7 +62,28 @@ function M.RegisterHooks()
     if transcendenceHooked then
         Logging.LogInfo("Transcendence ending hook registered")
     else
-        Logging.LogWarning("Could not hook Transcendence ending — will fall back to polling")
+        Logging.LogWarning("Could not hook Transcendence ending — will use NotifyOnNewObject + polling")
+        M._transcendenceHookFailed = true
+    end
+
+    -- ---------------------------------------------------------
+    -- Transcendence: NotifyOnNewObject fallback
+    -- The director BP class only loads when the ending cutscene
+    -- triggers, so the startup RegisterHook always fails.
+    -- NotifyOnNewObject fires when the CDO is constructed as
+    -- the package streams in — reliable immediate detection.
+    -- ---------------------------------------------------------
+    local notifyHooked = pcall(function()
+        NotifyOnNewObject("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence_DirectorBP_C", function(createdObject)
+            if M.GoalCompleted then return end
+            Logging.LogInfo("[Goal] Ending_Transcendence_DirectorBP_C constructed — ending is loading")
+            M._FireGoal("Transcendence", "NotifyOnNewObject — Ending_Transcendence_DirectorBP_C")
+        end)
+    end)
+    if notifyHooked then
+        Logging.LogInfo("Transcendence NotifyOnNewObject registered")
+    else
+        Logging.LogWarning("Could not register NotifyOnNewObject for Transcendence")
     end
 
     -- ---------------------------------------------------------
@@ -233,6 +258,21 @@ function M.CheckGoals(state)
             M._playersDumped = true
         end
     end)
+
+    -- Transcendence fallback: The director BP class only loads when the
+    -- ending cutscene plays, so the startup hook will always fail.
+    -- Use StaticFindObject to check for the specific LevelSequence
+    -- object — it only exists in memory when the ending package is loaded.
+    if M._transcendenceHookFailed then
+        pcall(function()
+            local seq = StaticFindObject("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence")
+            if seq and seq:IsValid() then
+                M._FireGoal("Transcendence", "Polling — Ending_Transcendence LevelSequence found in memory")
+                return
+            end
+        end)
+        if M.GoalCompleted then return false end
+    end
 
     -- Secondary fallback: IsGameCompleted
     local completed = false
