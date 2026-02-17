@@ -171,30 +171,44 @@ end
 -- ============================================================
 
 -- Refresh the in-game tetromino UI (HUD counter, arranger screens).
--- The HUD hierarchy is:
---   ABP_TalosHUD_C (actor, extends ATalosHUD)
---     .WidgetRoot → UTalosHUD (widget, extends UTalosUserWidget)
---       .ArrangerInfo → UArrangerInfoPanel
---         :UpdateInventory()  ← refreshes tetromino counters
---       :UpdateExplorationMode() ← refreshes exploration-mode overlay
 --
--- IMPORTANT: UpdateExplorationMode reads the CollectedTetrominos TMap
--- internally. If called while the TMap is being mutated (e.g. from
--- the enforce loop or a grant), the engine hits
--- "ArrayNum exceeds ArrayMax" and crashes. To avoid this:
---   1. Debounce: only ONE refresh is scheduled per batch of grants.
---   2. Delay: wait 500ms so TMap mutations from grant/enforce settle.
---   3. ExecuteInGameThread: ensure we run on a clean engine frame.
+-- NOTE ON CLASS HIERARCHY:
+--   UTalosHUD is an AngelScript class — it does NOT appear in
+--   UE4SS Live View.  The Blueprint widget that extends it is
+--   UWBP_TalosUserWidget_C, which IS visible and findable.
+--
+-- Safe refresh approach (avoids the TMap crash):
+--   1. FindFirstOf("WBP_TalosUserWidget_C") → the live HUD widget
+--      .ArrangerInfo → UArrangerInfoPanel
+--        :UpdateInventory()  ← refreshes tetromino piece counters
+--   2. OnScriptTetrominoCollected_BP on BP_Arranger_C instances
+--      ← notifies each arranger about a newly collected piece
+--   3. PerformWidgetUpdates() on the specific ATetrominoItem
+--      ← the game's own method called during natural pickup flow
+--
+-- UNSAFE (removed): UpdateExplorationMode() on UTalosHUD
+--   This method internally iterates CollectedTetrominos TMap.
+--   The 5ms visibility loop constantly mutates that same TMap,
+--   causing "ArrayNum exceeds ArrayMax" crashes.  The exploration
+--   mode overlay already updates itself via UTalosHUD::Tick()
+--   every frame, so we don't need to force it.
 
 local _uiRefreshPending = false
 
 local function RefreshTetrominoUI(tetrominoId)
     Logging.LogDebug("RefreshTetrominoUI called for: " .. tostring(tetrominoId))
 
-    -- === Notify arrangers immediately (safe, doesn't touch TMap) ===
+    -- === Notify arrangers (safe — doesn't touch TMap) ===
     if tetrominoId then
         local targetItem = TetrominoUtils.FindTetrominoItemById(tetrominoId)
         if targetItem then
+            -- Call the game's own PerformWidgetUpdates on the item
+            pcall(function()
+                targetItem:PerformWidgetUpdates()
+                Logging.LogDebug("  PerformWidgetUpdates() called on " .. tetrominoId)
+            end)
+
+            -- Notify each arranger in the level
             pcall(function()
                 local arrangers = FindAllOf("BP_Arranger_C")
                 if arrangers then
@@ -209,59 +223,41 @@ local function RefreshTetrominoUI(tetrominoId)
         end
     end
 
-    -- === Debounced HUD widget refresh ===
-    -- When multiple items arrive rapidly (AP sync), only schedule
-    -- one deferred refresh instead of stacking dozens of LoopAsync
-    -- callbacks that all try to read the TMap simultaneously.
+    -- === Debounced HUD counter refresh ===
     if _uiRefreshPending then
         Logging.LogDebug("  UI refresh already pending, skipping duplicate")
         return
     end
     _uiRefreshPending = true
 
-    -- Wait 500ms for TMap mutations to settle, then refresh on
-    -- the game thread so the engine is in a stable frame state.
     LoopAsync(500, function()
         _uiRefreshPending = false
 
         ExecuteInGameThread(function()
             pcall(function()
-                local hudActors = FindAllOf("BP_TalosHUD_C")
-                if not hudActors then
-                    Logging.LogDebug("  No BP_TalosHUD_C actors found")
+                -- Find the HUD widget directly by its Blueprint class name.
+                -- UWBP_TalosUserWidget_C extends UTalosHUD extends UTalosUserWidget.
+                -- This is visible in UE4SS Live View (unlike the AngelScript parent).
+                local hudWidget = FindFirstOf("WBP_TalosUserWidget_C")
+                if not hudWidget or not hudWidget:IsValid() then
+                    Logging.LogDebug("  No WBP_TalosUserWidget_C found")
                     return
                 end
 
-                for _, hudActor in ipairs(hudActors) do
-                    if not hudActor or not hudActor:IsValid() then goto nextHud end
-
-                    local widget = nil
-                    pcall(function() widget = hudActor.WidgetRoot end)
-                    if not widget then goto nextHud end
-
-                    local wValid = false
-                    pcall(function() wValid = widget:IsValid() end)
-                    if not wValid then goto nextHud end
-
-                    -- ArrangerInfo:UpdateInventory (counter refresh)
-                    pcall(function()
-                        if widget.ArrangerInfo then
-                            widget.ArrangerInfo:UpdateInventory()
+                -- ArrangerInfo:UpdateInventory — refreshes piece counters
+                pcall(function()
+                    local arrangerInfo = hudWidget.ArrangerInfo
+                    if arrangerInfo then
+                        local aiValid = false
+                        pcall(function() aiValid = arrangerInfo:IsValid() end)
+                        if aiValid then
+                            arrangerInfo:UpdateInventory()
                             Logging.LogDebug("  ArrangerInfo:UpdateInventory() called")
                         end
-                    end)
-
-                    -- UpdateExplorationMode (HUD overlay refresh)
-                    local ok, err = pcall(function()
-                        widget:UpdateExplorationMode()
-                        Logging.LogDebug("  UpdateExplorationMode() called successfully")
-                    end)
-                    if not ok then
-                        Logging.LogDebug("  UpdateExplorationMode() error: " .. tostring(err))
+                    else
+                        Logging.LogDebug("  ArrangerInfo is nil on HUD widget")
                     end
-
-                    ::nextHud::
-                end
+                end)
             end)
         end)
 

@@ -122,24 +122,27 @@ local function CreateWidget()
                     tree.RootWidget = canvas
                     local slot = canvas:AddChildToCanvas(tb)
                     if slot then
-                        -- Anchor to bottom-right corner of screen
+                        -- Anchor to bottom-left corner of screen
                         pcall(function()
-                            slot:SetAnchors({Minimum = {X = 1, Y = 1}, Maximum = {X = 1, Y = 1}})
+                            slot:SetAnchors({Minimum = {X = 0, Y = 1}, Maximum = {X = 0, Y = 1}})
                         end)
-                        -- Pivot at bottom-right of the text block
+                        -- Pivot at bottom-left of the text block
                         pcall(function()
-                            slot:SetAlignment({X = 1, Y = 1})
+                            slot:SetAlignment({X = 0, Y = 1})
                         end)
-                        -- Auto-size so the slot fits the text content
+                        -- Set fixed width to enable text wrapping; auto-size height
                         pcall(function()
-                            slot:SetAutoSize(true)
+                            slot:SetAutoSize(false)
                         end)
-                        -- Offset inward from the corner (negative = towards center)
                         pcall(function()
-                            slot:SetPosition({X = -30, Y = -50})
+                            slot:SetSize({X = 1000, Y = 0})  -- 600px wide, height auto
+                        end)
+                        -- Offset inward from the corner
+                        pcall(function()
+                            slot:SetPosition({X = 30, Y = -300})
                         end)
                         useCanvas = true
-                        Logging.LogInfo("HUD: Using CanvasPanel layout (bottom-right anchored)")
+                        Logging.LogInfo("HUD: Using CanvasPanel layout (bottom-left anchored)")
                     end
                 end
             end)
@@ -157,6 +160,9 @@ local function CreateWidget()
         -- Style: empty initial text
         pcall(function() tb:SetText(FText("")) end)
 
+        -- Enable text wrapping
+        pcall(function() tb:SetAutoWrapText(true) end)
+
         -- Font size — larger for readability
         pcall(function()
             local fontInfo = tb.Font
@@ -165,8 +171,8 @@ local function CreateWidget()
             end
         end)
 
-        -- Right-justify text so lines align to the right edge
-        pcall(function() tb:SetJustification(2) end)  -- ETextJustify::Right = 2
+        -- Left-justify text so lines align to the left edge
+        pcall(function() tb:SetJustification(0) end)  -- ETextJustify::Left = 0
 
         -- Strong drop shadow for contrast against any background
         pcall(function() tb:SetShadowOffset({X = 2.0, Y = 2.0}) end)
@@ -181,11 +187,10 @@ local function CreateWidget()
         -- If no canvas layout, position via absolute coords (bottom-right-ish)
         if not useCanvas then
             pcall(function()
-                -- Use alignment so the widget's bottom-right corner is the anchor
-                w:SetAlignmentInViewport({X = 1, Y = 1})
-                -- Large coords to push towards bottom-right
-                -- (works well at 1080p+; the alignment handles the offset)
-                w:SetPositionInViewport({X = 1890, Y = 1030}, false)
+                -- Use alignment so the widget's bottom-left corner is the anchor
+                w:SetAlignmentInViewport({X = 0, Y = 1})
+                -- Position at bottom-left
+                w:SetPositionInViewport({X = 30, Y = 1030}, false)
             end)
         end
 
