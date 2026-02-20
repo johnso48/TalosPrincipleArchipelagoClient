@@ -268,7 +268,7 @@ end
 local LoopCount = 0
 local AP_SYNC_TIMEOUT = 0  -- 2 seconds (20 * 100ms) before enabling enforcement anyway
 
-LoopAsync(100, function()
+LoopAsync(200, function()
     LoopCount = LoopCount + 1
 
     -- Poll the Archipelago client (handles network I/O)

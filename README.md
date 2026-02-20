@@ -24,7 +24,6 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
       - HookProcessLocalScriptFunction
       - HookInitGameState
       - HookLoadMap
-      - HookCallFunctionByNameWithArguments
       - HookBeginPlay
       - HookEndPlay
    - **Note**: The experimental-latest version is required for Unreal Engine 5.4 support
