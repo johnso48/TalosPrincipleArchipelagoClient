@@ -5,8 +5,10 @@
 -- MAX_VISIBLE lines are shown at once. New messages appear at
 -- the bottom; old messages scroll up and expire after a timeout.
 --
--- TextBlocks are created on-demand when a notification arrives
--- and destroyed when they expire or are pushed out.
+-- Each notification line is a HorizontalBox containing one TextBlock
+-- per colored segment, allowing multi-color text on a single line.
+-- Widgets are created on-demand and destroyed when they expire or
+-- are pushed out.
 --
 -- Usage:
 --   local HUD = require("lib.hud")
@@ -81,25 +83,32 @@ end
 -- ============================================================
 -- UMG class references (cached on first use)
 -- ============================================================
-local UserWidgetClass  = nil
-local WidgetTreeClass  = nil
-local CanvasPanelClass = nil
-local TextBlockClass   = nil
+local UserWidgetClass     = nil
+local WidgetTreeClass     = nil
+local CanvasPanelClass    = nil
+local TextBlockClass      = nil
+local HorizontalBoxClass  = nil
+
+-- Flag to prevent concurrent calls
+local creatingWidget      = false  -- flag to prevent concurrent CreateWidget calls
+local destroyingWidget     = false  -- flag to prevent concurrent DestroyWidget calls
 
 local function CacheClasses()
     if UserWidgetClass then return true end
     local ok, err = pcall(function()
-        UserWidgetClass  = StaticFindObject("/Script/UMG.UserWidget")
-        WidgetTreeClass  = StaticFindObject("/Script/UMG.WidgetTree")
-        CanvasPanelClass = StaticFindObject("/Script/UMG.CanvasPanel")
-        TextBlockClass   = StaticFindObject("/Script/UMG.TextBlock")
+        UserWidgetClass     = StaticFindObject("/Script/UMG.UserWidget")
+        WidgetTreeClass     = StaticFindObject("/Script/UMG.WidgetTree")
+        CanvasPanelClass    = StaticFindObject("/Script/UMG.CanvasPanel")
+        TextBlockClass      = StaticFindObject("/Script/UMG.TextBlock")
+        HorizontalBoxClass  = StaticFindObject("/Script/UMG.HorizontalBox")
     end)
     if not ok then
         Logging.LogError("HUD: Failed to find UMG classes: " .. tostring(err))
         return false
     end
     if not UserWidgetClass or not WidgetTreeClass
-       or not CanvasPanelClass or not TextBlockClass then
+       or not CanvasPanelClass or not TextBlockClass
+       or not HorizontalBoxClass then
         Logging.LogWarning("HUD: One or more UMG classes not found")
         return false
     end
@@ -113,17 +122,6 @@ end
 --- Wrap a FLinearColor table as FSlateColor for SetColorAndOpacity.
 local function FSlateColor(c)
     return { SpecifiedColor = c, ColorUseRule = 0 }
-end
-
---- Pick the most prominent (first non-white) color from segments.
-local function DominantColor(segments)
-    -- for _, seg in ipairs(segments) do
-    --     local c = seg.color
-    --     if c and c ~= M.COLORS.WHITE and c ~= M.COLORS.SERVER then
-    --         return c
-    --     end
-    -- end
-    return M.COLORS.WHITE
 end
 
 --- Concatenate all segment texts.
@@ -146,12 +144,25 @@ local pendingQueue = {}    -- notifications queued before widget is ready
 local timeAccum    = 0     -- accumulated seconds (from tick loop)
 
 -- Scrolling log: ordered list, oldest first.
--- Each entry: { textBlock = UTextBlock, canvasSlot = UCanvasPanelSlot, expireTime = number }
+-- Each entry: { hbox = UHorizontalBox, canvasSlot = UCanvasPanelSlot, expireTime = number }
 local entries      = {}
 local entryCounter = 0     -- monotonic counter for unique FName
 
 --- Destroy existing widget if still valid, so we can recreate cleanly.
 local function DestroyWidget()
+
+    if creatingWidget then
+        Logging.LogWarning("HUD: DestroyWidget called during CreateWidget, skipping")
+        return
+    end
+
+    if destroyingWidget then
+        Logging.LogWarning("HUD: DestroyWidget already in progress, skipping")
+        return
+    end
+
+    destroyingWidget = true
+
     if hudWidget and hudWidget:IsValid() then
         pcall(function() hudWidget:RemoveFromParent() end)
     end
@@ -160,17 +171,33 @@ local function DestroyWidget()
     entries      = {}
     entryCounter = 0
     widgetReady  = false
+
+    destroyingWidget = false
 end
 
 --- Create the bare UMG container (UserWidget + WidgetTree + CanvasPanel).
 --- TextBlocks are NOT pre-created; they are added on-demand.
 --- MUST be called from the game thread.
 local function CreateWidget()
+
+    if creatingWidget then
+        Logging.LogWarning("HUD: CreateWidget already in progress, skipping")
+        return false
+    end
+
+    if destroyingWidget then
+        Logging.LogWarning("HUD: CreateWidget called during DestroyWidget, skipping")
+        return false
+    end
+
+    creatingWidget = true
+
     if not CacheClasses() then return false end
 
     local gi = UEHelpers.GetGameInstance()
     if not gi or not gi:IsValid() then
         Logging.LogWarning("HUD: GameInstance not available yet")
+        creatingWidget = false
         return false
     end
 
@@ -180,6 +207,7 @@ local function CreateWidget()
     hudWidget = StaticConstructObject(UserWidgetClass, gi, FName("APNotifWidget"))
     if not hudWidget or not hudWidget:IsValid() then
         Logging.LogError("HUD: Failed to construct UserWidget")
+        creatingWidget = false
         return false
     end
 
@@ -194,6 +222,8 @@ local function CreateWidget()
 
     widgetReady = true
     Logging.LogInfo("HUD: UMG container created and added to viewport")
+
+    creatingWidget = false
     return true
 end
 
@@ -201,9 +231,9 @@ end
 -- Entry lifecycle
 -- ============================================================
 
---- Remove a single entry: detach its TextBlock from the canvas.
+--- Remove a single entry: detach its HorizontalBox from the canvas.
 local function RemoveEntry(entry)
-    pcall(function() canvas:RemoveChild(entry.textBlock) end)
+    pcall(function() canvas:RemoveChild(entry.hbox) end)
 end
 
 --- Reposition all live entries so they form a top-to-bottom log.
@@ -219,44 +249,55 @@ local function RepositionEntries()
     end
 end
 
---- Create a new TextBlock, parent it to the canvas, configure it,
---- and append it to the entries list.  MUST be on the game thread.
-local function AddEntry(text, color, duration)
+--- Create a HorizontalBox with one TextBlock per colored segment,
+--- parent it to the canvas, and append it to the entries list.
+--- `segments` is an array of { text = string, color = table }.
+--- MUST be called on the game thread.
+local function AddEntry(segments, duration)
     entryCounter = entryCounter + 1
-    local name = "APNotif_" .. entryCounter
+    local baseName = "APNotif_" .. entryCounter
 
-    -- Construct the TextBlock (outer = canvas for proper GC)
-    local tb = StaticConstructObject(TextBlockClass, canvas, FName(name))
-    if not tb or not tb:IsValid() then
-        Logging.LogError("HUD: Failed to construct TextBlock " .. name)
+    -- 1. Construct a HorizontalBox to hold the coloured segments
+    local hbox = StaticConstructObject(HorizontalBoxClass, canvas, FName(baseName .. "_HBox"))
+    if not hbox or not hbox:IsValid() then
+        Logging.LogError("HUD: Failed to construct HorizontalBox " .. baseName)
         return
     end
 
-    -- Parent to canvas FIRST — this creates the Slate widget and the
-    -- UCanvasPanelSlot, which initialises the internal TArrays that
-    -- would otherwise trip the UE4SS invariant checks.
-    local canvasSlot = canvas:AddChildToCanvas(tb)
+    -- Parent the HorizontalBox to the canvas — creates the canvas slot
+    local canvasSlot = canvas:AddChildToCanvas(hbox)
     pcall(function() canvasSlot:SetAutoSize(true) end)
+    pcall(function() hbox:SetVisibility(ESlateVisibility.SelfHitTestInvisible) end)
 
-    -- Configure text, color and shadow — each in pcall for resilience.
-    -- Safe to read tb.Font here because AddChildToCanvas above has fully
-    -- initialised the Slate widget, so FSlateFontInfo's internal TArrays exist.
-    pcall(function()
-        local fi = tb.Font
-        if fi then
-            fi.Size = 16
-            tb:SetFont(fi)
+    -- 2. For each segment, create a TextBlock and add it to the HBox
+    for idx, seg in ipairs(segments) do
+        local tbName = baseName .. "_Seg" .. idx
+        local tb = StaticConstructObject(TextBlockClass, hbox, FName(tbName))
+        if tb and tb:IsValid() then
+            -- Parent to HBox FIRST so Slate widget is initialised
+            local hboxSlot = hbox:AddChildToHorizontalBox(tb)
+
+            -- Configure text, font, color and shadow
+            pcall(function()
+                local fi = tb.Font
+                if fi then
+                    fi.Size = 16
+                    tb:SetFont(fi)
+                end
+            end)
+            pcall(function() tb:SetText(FText(seg.text)) end)
+            pcall(function() tb:SetShadowOffset({ X = SHADOW_OFFSET_X, Y = SHADOW_OFFSET_Y }) end)
+            pcall(function() tb:SetShadowColorAndOpacity(SHADOW_COLOR) end)
+            pcall(function() tb:SetColorAndOpacity(FSlateColor(seg.color or M.COLORS.WHITE)) end)
+            pcall(function() tb:SetVisibility(ESlateVisibility.SelfHitTestInvisible) end)
+        else
+            Logging.LogWarning("HUD: Failed to construct TextBlock " .. tbName)
         end
-    end)
-    pcall(function() tb:SetText(FText(text)) end)
-    pcall(function() tb:SetShadowOffset({ X = SHADOW_OFFSET_X, Y = SHADOW_OFFSET_Y }) end)
-    pcall(function() tb:SetShadowColorAndOpacity(SHADOW_COLOR) end)
-    pcall(function() tb:SetColorAndOpacity(FSlateColor(color)) end)
-    pcall(function() tb:SetVisibility(ESlateVisibility.SelfHitTestInvisible) end)
+    end
 
-    -- Append to log (newest at the end)
+    -- 3. Append to log (newest at the end)
     local entry = {
-        textBlock  = tb,
+        hbox       = hbox,
         canvasSlot = canvasSlot,
         expireTime = timeAccum + duration,
     }
@@ -316,7 +357,7 @@ local function DrainPending()
     local i = 1
     while i <= #pendingQueue do
         local notif = pendingQueue[i]
-        local ok, err = pcall(AddEntry, notif.text, notif.color, notif.duration)
+        local ok, err = pcall(AddEntry, notif.segments, notif.duration)
         if not ok then
             Logging.LogError("HUD: AddEntry failed: " .. tostring(err))
         end
@@ -356,8 +397,8 @@ function M.Init()
 end
 
 --- Queue a notification made of colored text segments.
---- All segment texts are concatenated; the dominant (first non-white)
---- color is used for the entire line (UMG TextBlock is single-color).
+--- Each segment keeps its own color; they are rendered side-by-side
+--- inside a HorizontalBox so multi-color lines display correctly.
 function M.Notify(segments, duration)
     if not enabled then return end
     if not segments or #segments == 0 then return end
@@ -372,12 +413,9 @@ function M.Notify(segments, duration)
     end
     if #clean == 0 then return end
 
-    local text  = ConcatSegments(clean)
-    local color = DominantColor(clean)
+    Logging.LogInfo("HUD notify: " .. ConcatSegments(clean))
 
-    Logging.LogInfo("HUD notify: " .. text)
-
-    table.insert(pendingQueue, { text = text, color = color, duration = duration })
+    table.insert(pendingQueue, { segments = clean, duration = duration })
     -- Cap the queue so it doesn't grow unbounded
     while #pendingQueue > MAX_VISIBLE do
         table.remove(pendingQueue, 1)

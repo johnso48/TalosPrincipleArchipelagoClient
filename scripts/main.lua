@@ -46,7 +46,9 @@ local State = {
     NeedsProgressRefresh = true,  -- deferred flag: find progress on next loop iteration
     NeedsTetrominoScan = true,    -- deferred flag: snapshot tetromino positions on next safe tick
     CachedActorPaths = {},        -- set of actor paths (keys) for cache rebuild retries
-    CacheRetryCountdown = 0       -- ticks until next cache rebuild attempt (0 = no retry pending)
+    CacheRetryCountdown = 0,      -- ticks until next cache rebuild attempt (0 = no retry pending)
+    FenceMap = {},                -- tetrominoId → LoweringFence actor (built from script actors)
+    PendingFenceOpens = {}        -- queue of {fence=, tetId=} to open on next keybind/tick
 }
 
 -- External callback for Archipelago integration
@@ -116,6 +118,21 @@ local function OnTetrominoCollected(tetrominoId)
     -- Mark this location as checked so the item stays hidden
     Collection.MarkLocationChecked(tetrominoId)
     State.CollectedThisSession[tetrominoId] = true
+
+    -- Open the puzzle exit fence if one is mapped to this tetromino
+    local fence = State.FenceMap[tetrominoId]
+    if fence then
+        local fenceValid = false
+        pcall(function() fenceValid = fence:IsValid() end)
+        if fenceValid then
+            -- Queue the fence open for processing in a dedicated LoopAsync
+            -- that runs on the game thread with proper timing
+            table.insert(State.PendingFenceOpens, { fence = fence, tetId = tetrominoId })
+            Logging.LogInfo(string.format("FenceMap: queued fence open for %s", tetrominoId))
+        else
+            Logging.LogWarning(string.format("FenceMap: fence for %s is no longer valid", tetrominoId))
+        end
+    end
     
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
     -- Guard: skip if a level transition started while we were waiting.
@@ -150,6 +167,7 @@ RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
     -- after the cooldown expires.
     State.CurrentProgress = nil
     State.TrackedItems = {}
+    State.FenceMap = {}
     State.LevelTransitionCooldown = 15
     State.NeedsProgressRefresh = true
     State.NeedsTetrominoScan = true
@@ -169,6 +187,7 @@ RegisterHook("/Script/Talos.TalosGameInstance:SetTalosSaveGameInstance", functio
     State.LevelTransitionCooldown = 15
     State.CurrentProgress = nil
     State.TrackedItems = {}
+    State.FenceMap = {}
     State.CollectedThisSession = {}
     State.CachedActorPaths = {}
     State.CacheRetryCountdown = 0
@@ -186,6 +205,7 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
     Logging.LogInfo("ReloadSaveGame called — will re-acquire progress on player spawn")
     State.CurrentProgress = nil
     State.TrackedItems = {}
+    State.FenceMap = {}
     State.CachedActorPaths = {}
     State.CacheRetryCountdown = 0
     State.LevelTransitionCooldown = 20
@@ -210,6 +230,7 @@ pcall(function()
         State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
+        State.FenceMap = {}
         State.CachedActorPaths = {}
         State.CacheRetryCountdown = 0
         Collection.ResetRemovalCache()
@@ -223,6 +244,7 @@ pcall(function()
         State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
+        State.FenceMap = {}
         State.CachedActorPaths = {}
         State.CacheRetryCountdown = 0
         Collection.ResetRemovalCache()
@@ -400,6 +422,33 @@ LoopAsync(200, function()
                     Logging.LogInfo(string.format(
                         "Visibility cache incomplete (%d/%d) — will retry", cached, total))
                 end
+
+                -- Build fence map: tetrominoId → LoweringFence actor
+                -- Uses LoweringFenceWhenTetrominoIsPickedUpScript which links
+                -- each tetromino to its puzzle exit fence.
+                State.FenceMap = {}
+                pcall(function()
+                    local scripts = FindAllOf("LoweringFenceWhenTetrominoIsPickedUpScript")
+                    if scripts then
+                        for _, script in ipairs(scripts) do
+                            pcall(function()
+                                local tet = script.Tetromino
+                                local fence = script.LoweringFence
+                                if tet and tet:IsValid() and fence and fence:IsValid() then
+                                    local tetId = TetrominoUtils.GetTetrominoId(tet)
+                                    if tetId then
+                                        State.FenceMap[tetId] = fence
+                                        Logging.LogInfo(string.format(
+                                            "FenceMap: %s → %s", tetId, tostring(fence:GetFullName())))
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end)
+                Logging.LogInfo(string.format("FenceMap: %d entries built", (function()
+                    local n = 0; for _ in pairs(State.FenceMap) do n = n + 1 end; return n
+                end)()))
             end
         end)
     end
@@ -637,6 +686,50 @@ LoopAsync(200, function()
 end)
 
 -- ============================================================
+-- Fence open queue processor — runs every 100ms on game thread.
+-- Angelscript methods like Open() require game-thread timing that
+-- the main LoopAsync may not provide reliably. This dedicated
+-- loop retries up to 10 times with 100ms spacing.
+-- ============================================================
+LoopAsync(100, function()
+    if #State.PendingFenceOpens == 0 then
+        return false  -- nothing to do, keep looping
+    end
+
+    local remaining = {}
+    for _, entry in ipairs(State.PendingFenceOpens) do
+        local attempts = entry.attempts or 0
+        local opened = false
+
+        pcall(function()
+            if entry.fence and entry.fence:IsValid() then
+                entry.fence:Open()
+                opened = true
+            end
+        end)
+
+        if opened then
+            Logging.LogInfo(string.format("FenceMap: opened fence for %s (attempt %d)",
+                entry.tetId, attempts + 1))
+        else
+            attempts = attempts + 1
+            if attempts < 10 then
+                entry.attempts = attempts
+                table.insert(remaining, entry)
+                Logging.LogDebug(string.format("FenceMap: retry %d/10 for %s",
+                    attempts, entry.tetId))
+            else
+                Logging.LogWarning(string.format("FenceMap: gave up opening fence for %s after 10 attempts",
+                    entry.tetId))
+            end
+        end
+    end
+
+    State.PendingFenceOpens = remaining
+    return false  -- keep looping
+end)
+
+-- ============================================================
 -- Debug keybinds
 -- ============================================================
 
@@ -807,6 +900,22 @@ RegisterKeyBind(Key.F9, function()
         { text = "Green J",       color = HUD.COLORS.ITEM   },
     })
     HUD.NotifySimple("AP Connected to " .. (Config.server or "?"), HUD.COLORS.SERVER)
+end)
+
+-- F10: Dump current FenceMap state
+RegisterKeyBind(Key.F10, function()
+    Logging.LogInfo("=== F10: FenceMap dump ===")
+    local count = 0
+    for tetId, fence in pairs(State.FenceMap) do
+        local valid = false
+        pcall(function() valid = fence:IsValid() end)
+        local name = "?"
+        pcall(function() name = tostring(fence:GetFullName()) end)
+        Logging.LogInfo(string.format("  %s → %s (valid=%s)", tetId, name, tostring(valid)))
+        count = count + 1
+    end
+    Logging.LogInfo(string.format("FenceMap: %d entries", count))
+    Logging.LogInfo("=== F10 done ===")
 end)
 
 -- ============================================================

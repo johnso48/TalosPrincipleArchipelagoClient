@@ -178,6 +178,11 @@ local function OnSlotConnected(slot_data)
         end
     end
 
+    -- Apply slot_data settings to Collection
+    local reusable = slot_data["reusable_tetrominos"] or 0
+    Collection.ReusableTetrominos = (reusable ~= 0)
+    Logging.LogInfo(string.format("AP: reusable_tetrominos = %s", tostring(Collection.ReusableTetrominos)))
+
     -- Mark as synced — items_received fires separately but we know the connection is live.
     Collection.APSynced = true
     Logging.LogInfo("AP: APSynced = true — enforcement is now enabled")
@@ -313,35 +318,127 @@ local function OnBounced(bounce)
     end
 end
 
+-- ============================================================
+-- PrintJson color helpers
+-- ============================================================
+
+--- Map AP named color strings to HUD colors.
+local AP_NAMED_COLORS = {
+    red       = HUD.COLORS.TRAP,
+    green     = HUD.COLORS.ITEM,
+    blue      = HUD.COLORS.USEFUL,
+    slateblue = HUD.COLORS.USEFUL,
+    magenta   = HUD.COLORS.PROGRESSION,
+    purple    = HUD.COLORS.PROGRESSION,
+    yellow    = HUD.COLORS.LOCATION,
+    cyan      = HUD.COLORS.PLAYER,
+    white     = HUD.COLORS.WHITE,
+    black     = HUD.COLORS.WHITE,  -- don't render invisible text
+}
+
+--- Choose the HUD color for a single AP message part based on its type.
+local function ColorForPart(part)
+    local partType = part.type or "text"
+    if partType == "player_id" then
+        return HUD.COLORS.PLAYER
+    elseif partType == "item_id" or partType == "item_name" then
+        return HUD.ColorForFlags(part.flags or 0)
+    elseif partType == "location_id" or partType == "location_name" then
+        return HUD.COLORS.LOCATION
+    elseif partType == "entrance_name" then
+        return HUD.COLORS.ENTRANCE
+    elseif partType == "color" then
+        return AP_NAMED_COLORS[part.color] or HUD.COLORS.WHITE
+    end
+    return HUD.COLORS.WHITE
+end
+
+--- Resolve the display text for a single AP message part.
+--- ID-based parts (player_id, item_id, location_id) have their
+--- numeric IDs converted to human-readable names via the AP client.
+local function ResolvePartText(part)
+    local partType = part.type or "text"
+    local text = part.text or ""
+
+    if not ap then return text end
+
+    if partType == "player_id" then
+        local slot = tonumber(text)
+        if slot then
+            local ok, name = pcall(function() return ap:get_player_alias(slot) end)
+            if ok and name and name ~= "" then return name end
+        end
+    elseif partType == "item_id" then
+        local itemId = tonumber(text)
+        local playerSlot = part.player or 0
+        if itemId then
+            local ok, name = pcall(function()
+                local game = ap:get_player_game(playerSlot)
+                return ap:get_item_name(itemId, game)
+            end)
+            if ok and name and name ~= "" then return name end
+        end
+    elseif partType == "location_id" then
+        local locId = tonumber(text)
+        local playerSlot = part.player or 0
+        if locId then
+            local ok, name = pcall(function()
+                local game = ap:get_player_game(playerSlot)
+                return ap:get_location_name(locId, game)
+            end)
+            if ok and name and name ~= "" then return name end
+        end
+    end
+
+    return text
+end
+
+--- Build an array of { text, color } HUD segments from an AP PrintJson
+--- message array, resolving IDs and assigning per-part colors.
+local function BuildColoredSegments(msg)
+    local segments = {}
+    for _, part in ipairs(msg) do
+        if type(part) == "table" then
+            local text  = ResolvePartText(part)
+            local color = ColorForPart(part)
+            if text ~= "" then
+                table.insert(segments, { text = text, color = color })
+            end
+        elseif type(part) == "string" and part ~= "" then
+            table.insert(segments, { text = part, color = HUD.COLORS.WHITE })
+        end
+    end
+    return segments
+end
+
 local function OnPrintJson(msg, extra)
     printJsonCallCount = printJsonCallCount + 1
     if not msg then return end
 
-    -- Render the message parts into plain text using the AP client helper.
-    -- Each element in msg is a table with a "type" field ("text", "player_id",
-    -- "item_id", "location_id", etc.) and lua-apclientpp's render_json
-    -- resolves IDs to display names and concatenates everything.
-    local plain
-    if ap and ap.render_json then
-        local ok, result = pcall(function() return ap:render_json(msg) end)
-        if ok and result then
-            plain = result
+    -- Suppress self-to-self item sends — the items_received handler
+    -- already shows a "You found ..." notification for these.
+    if extra then
+        local msgType    = extra.type
+        local receiving  = extra.receiving
+        local senderSlot = extra.item and extra.item.player
+        if msgType == "ItemSend"
+           and receiving == M.PlayerSlot
+           and senderSlot == M.PlayerSlot then
+            Logging.LogDebug("AP: Suppressed self-to-self ItemSend PrintJson")
+            return
         end
     end
 
-    -- Fallback: manually concatenate "text" fields
-    if not plain or plain == "" then
-        local parts = {}
-        for _, part in ipairs(msg) do
-            if type(part) == "table" and part.text then
-                table.insert(parts, part.text)
-            elseif type(part) == "string" then
-                table.insert(parts, part)
-            end
-        end
-        plain = table.concat(parts)
-    end
+    -- Build color-coded segments from the AP message parts.
+    local segments = BuildColoredSegments(msg)
+    if #segments == 0 then return end
 
+    -- Build plain text from segments for logging and suppression checks.
+    local plainParts = {}
+    for _, seg in ipairs(segments) do
+        table.insert(plainParts, seg.text)
+    end
+    local plain = table.concat(plainParts)
     if plain == "" then return end
 
     -- Check suppression list
@@ -352,7 +449,7 @@ local function OnPrintJson(msg, extra)
     end
 
     Logging.LogInfo("AP[Chat]: " .. plain)
-    HUD.NotifySimple(plain, HUD.COLORS.WHITE)
+    HUD.Notify(segments)
 end
 
 -- ============================================================

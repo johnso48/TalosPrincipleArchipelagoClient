@@ -137,6 +137,11 @@ M.CheckedLocations = {}
 -- don't wipe the player's TMap before AP can repopulate grants.
 M.APSynced = false
 
+-- When true, tetrominos are reusable: enforcement resets the TMap
+-- boolean to false ("not used") so pieces can be placed again.
+-- Set from the AP slot_data "reusable_tetrominos" option.
+M.ReusableTetrominos = false
+
 -- ============================================================
 -- Collection state enforcement
 -- ============================================================
@@ -197,6 +202,23 @@ function M.EnforceCollectionState(state)
             if state.CurrentProgress and state.CurrentProgress:IsValid() then
                 TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, id)
             end
+        end)
+    end
+
+    -- Reusable tetrominos: reset the "used" flag to false so pieces
+    -- can be placed into arrangers again after being removed.
+    if M.ReusableTetrominos then
+        pcall(function()
+            local tmap = state.CurrentProgress.CollectedTetrominos
+            if not tmap then return end
+
+            tmap:ForEach(function(keyParam, valueParam)
+                local used = nil
+                pcall(function() used = valueParam:get() end)
+                if used == true then
+                    pcall(function() valueParam:set(false) end)
+                end
+            end)
         end)
     end
 end
