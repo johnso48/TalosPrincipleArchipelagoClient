@@ -10,26 +10,35 @@
 
 #include <vector>
 #include <cmath>
+#include <excpt.h>   // EXCEPTION_EXECUTE_HANDLER (SEH)
 
 using namespace RC;
 using namespace RC::Unreal;
 
-namespace TalosAP {
-
 // ============================================================
-// IsValidUObject — safely test a UObject* pointer via GUObjectArray
-// (FWeakObjectPtr resolves through the serial-number table so this
-// will return false for any GC'd / freed / pending-kill object).
+// SEH-protected ProcessEvent wrapper
+//
+// During level transitions, Unreal GC can destroy UObjects while
+// we hold pointers to them.  UFunction native function pointers
+// become garbage, causing access violations inside ProcessEvent.
+// C++ try/catch does NOT catch these (SEH exceptions under /EHsc).
+//
+// This function MUST remain free of C++ objects with non-trivial
+// destructors on the stack — MSVC forbids mixing __try with them.
 // ============================================================
-static bool IsValidUObject(UObject* obj)
+static bool SafeProcessEvent(UObject* target, UFunction* func, void* params)
 {
-    if (!obj) return false;
-    // Construct a weak ptr — its ctor walks GUObjectArray.  If the
-    // object is gone the serial numbers won't match and Get() will
-    // return nullptr without touching the object's memory.
-    FWeakObjectPtr weak(obj);
-    return weak.Get(false) != nullptr;
+    if (!target || !func) return false;
+    __try {
+        target->ProcessEvent(func, params);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
+
+namespace TalosAP {
 
 // ============================================================
 // Type/Shape → Letter lookups
@@ -164,22 +173,39 @@ bool VisibilityManager::GetPlayerPosition(float& outX, float& outY, float& outZ)
 }
 
 // ============================================================
+// World validity check
+// ============================================================
+
+bool VisibilityManager::IsWorldValid()
+{
+    try {
+        // During level teardown, FindFirstOf("PlayerController") returns
+        // nullptr (or the controller loses its Pawn).  Checking both is a
+        // lightweight signal that the world is still alive without relying
+        // on engine-internal members like UWorld* (not a UPROPERTY).
+        auto* pc = UObjectGlobals::FindFirstOf(STR("PlayerController"));
+        if (!pc) return false;
+
+        auto* pawnPtr = pc->GetValuePtrByPropertyNameInChain<UObject*>(STR("Pawn"));
+        return pawnPtr && *pawnPtr;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// ============================================================
 // Visibility control
 // ============================================================
 
-void VisibilityManager::SetActorVisible(UObject* actor)
+bool VisibilityManager::SetActorVisible(UObject* actor)
 {
-    // Validate actor is still live in GUObjectArray before any vtable use.
-    if (!IsValidUObject(actor)) return;
+    if (!actor) return false;
 
     auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-    if (!rootCompPtr || !*rootCompPtr) return;
+    if (!rootCompPtr || !*rootCompPtr) return false;
     UObject* rootComp = *rootCompPtr;
 
-    // Validate the component pointer too — it may have been GC'd separately.
-    if (!IsValidUObject(rootComp)) return;
-
-    // SetVisibility(true) — root only, do NOT propagate to children.
     // Propagation interferes with the game's animation system and
     // collection sequence (mesh fade, particle despawn).
     auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
@@ -187,7 +213,10 @@ void VisibilityManager::SetActorVisible(UObject* actor)
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = true;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setVisFunc, &params);
+        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: ProcessEvent(SetVisibility) caught stale object — aborting\n"));
+            return false;
+        }
     }
 
     // SetHiddenInGame(false) — root only, do NOT propagate.
@@ -196,28 +225,32 @@ void VisibilityManager::SetActorVisible(UObject* actor)
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = false;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setHiddenFunc, &params);
+        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: ProcessEvent(SetHiddenInGame) caught stale object — aborting\n"));
+            return false;
+        }
     }
+
+    return true;
 }
 
-void VisibilityManager::SetActorHidden(UObject* actor)
+bool VisibilityManager::SetActorHidden(UObject* actor)
 {
-    // Validate actor is still live in GUObjectArray before any vtable use.
-    if (!IsValidUObject(actor)) return;
+    if (!actor) return false;
 
     auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-    if (!rootCompPtr || !*rootCompPtr) return;
+    if (!rootCompPtr || !*rootCompPtr) return false;
     UObject* rootComp = *rootCompPtr;
-
-    // Validate the component pointer too — it may have been GC'd separately.
-    if (!IsValidUObject(rootComp)) return;
 
     auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
     if (setVisFunc) {
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = false;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setVisFunc, &params);
+        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: ProcessEvent(SetVisibility) caught stale object — aborting\n"));
+            return false;
+        }
     }
 
     auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
@@ -225,21 +258,23 @@ void VisibilityManager::SetActorHidden(UObject* actor)
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = true;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setHiddenFunc, &params);
+        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: ProcessEvent(SetHiddenInGame) caught stale object — aborting\n"));
+            return false;
+        }
     }
+
+    return true;
 }
 
 bool VisibilityManager::IsActorHidden(UObject* actor)
 {
-    if (!IsValidUObject(actor)) return false;
 
     // Check Root SceneComponent visibility state (matches our SetActorVisible/Hidden).
     // bVisible=false or bHiddenInGame=true means the item is hidden.
     auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
     if (!rootCompPtr || !*rootCompPtr) return false;
     UObject* rootComp = *rootCompPtr;
-
-    if (!IsValidUObject(rootComp)) return false;
 
     auto* visiblePtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bVisible"));
     if (visiblePtr && !*visiblePtr) return true;
@@ -322,6 +357,9 @@ void VisibilityManager::ScanLevel(ModState& state)
 
 void VisibilityManager::RefreshVisibility(ModState& state)
 {
+    // Abort if the world is being torn down — UObjects may be zombies.
+    if (!IsWorldValid()) return;
+
     std::vector<UObject*> items;
     try {
         UObjectGlobals::FindAllOf(STR("BP_TetrominoItem_C"), items);
@@ -364,11 +402,17 @@ void VisibilityManager::RefreshVisibility(ModState& state)
 
         // Apply visibility
         if (state.ShouldBeCollectable(tetId)) {
-            SetActorVisible(item);
+            if (!SetActorVisible(item)) {
+                Output::send<LogLevel::Warning>(STR("[TalosAP] RefreshVisibility: stale object detected, aborting pass\n"));
+                return; // World is tearing down — stop immediately
+            }
             tt.visRetries = 10; // lighter retries on refresh (~0.17s)
         } else if (state.IsLocationChecked(tetId)) {
             // Already checked — hide regardless of grant state
-            SetActorHidden(item);
+            if (!SetActorHidden(item)) {
+                Output::send<LogLevel::Warning>(STR("[TalosAP] RefreshVisibility: stale object detected, aborting pass\n"));
+                return;
+            }
         }
 
         newTracked[tetId] = tt;
@@ -387,6 +431,11 @@ void VisibilityManager::EnforceVisibility(
     const std::function<void(int64_t)>& locationCheckCallback)
 {
     if (m_tracked.empty()) return;
+
+    // Abort early if the world is being torn down.
+    // During level transitions, FindAllOf can still return zombie UObjects
+    // whose UFunction native pointers are garbage.
+    if (!IsWorldValid()) return;
 
     // Re-discover actors each enforcement tick so we have fresh UObject*.
     // This is necessary because Unreal GC can invalidate any cached pointer.
@@ -431,7 +480,10 @@ void VisibilityManager::EnforceVisibility(
             // Retries are set at scan/refresh time, NOT reset here.
             if (tt.visRetries > 0) {
                 if (IsActorHidden(actor)) {
-                    SetActorVisible(actor);
+                    if (!SetActorVisible(actor)) {
+                        Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object detected, aborting pass\n"));
+                        return; // World tearing down
+                    }
                 }
                 --tt.visRetries;
             }
@@ -450,7 +502,10 @@ void VisibilityManager::EnforceVisibility(
                         std::wstring(id.begin(), id.end()), std::sqrt(distSq));
 
                     tt.reported = true;
-                    SetActorHidden(actor);
+                    if (!SetActorHidden(actor)) {
+                        Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on pickup hide, aborting pass\n"));
+                        return;
+                    }
 
                     // Mark location as checked in state
                     state.MarkLocationChecked(id);
@@ -471,7 +526,10 @@ void VisibilityManager::EnforceVisibility(
             // Location has been checked — hide the actor regardless of grant state.
             // If granted to us: we already have it, no need to show the world item.
             // If granted to another player: same, hide it.
-            SetActorHidden(actor);
+            if (!SetActorHidden(actor)) {
+                Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on checked hide, aborting pass\n"));
+                return;
+            }
         }
     }
 }
@@ -485,6 +543,7 @@ void VisibilityManager::ResetCache()
     m_tracked.clear();
     m_fenceMap.clear();
     m_pendingFenceOpens.clear();
+    m_fnFenceOpen = nullptr;  // UFunction* may be stale after level transition
 }
 
 // ============================================================
@@ -741,6 +800,9 @@ void VisibilityManager::ProcessPendingFenceOpens()
 {
     if (m_pendingFenceOpens.empty()) return;
 
+    // Abort if the world is being torn down.
+    if (!IsWorldValid()) return;
+
     // Cache the ALoweringFence::Open UFunction on first use
     if (!m_fnFenceOpen) {
         try {
@@ -769,15 +831,15 @@ void VisibilityManager::ProcessPendingFenceOpens()
 
             for (auto* fence : fences) {
                 if (!fence) continue;
-                if (!IsValidUObject(fence)) continue;
                 try {
                     if (fence->GetFullName() == entry.fenceFullName) {
-                        // Found the fence — validate UFunction is still live then call Open()
-                        if (!IsValidUObject(m_fnFenceOpen)) {
-                            m_fnFenceOpen = nullptr;  // force re-lookup next tick
-                            break;
+                        if (!SafeProcessEvent(fence, m_fnFenceOpen, nullptr)) {
+                            Output::send<LogLevel::Warning>(
+                                STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
+                                std::wstring(entry.tetId.begin(), entry.tetId.end()));
+                            // Don't retry — world is likely tearing down
+                            return;
                         }
-                        fence->ProcessEvent(m_fnFenceOpen, nullptr);
                         opened = true;
                         break;
                     }

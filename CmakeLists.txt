@@ -56,6 +56,20 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nlohmann_json valijson apclientpp wswrap)
 
+# OpenSSL — required for wss:// (TLS) connections
+# If OpenSSL is not found automatically, set OPENSSL_ROOT_DIR to your install path.
+if(NOT DEFINED OPENSSL_ROOT_DIR AND NOT DEFINED ENV{OPENSSL_ROOT_DIR})
+    # Common default install locations for pre-built Windows OpenSSL
+    foreach(_ssl_hint "C:/Program Files/OpenSSL-Win64" "C:/OpenSSL-Win64")
+        if(EXISTS "${_ssl_hint}/include/openssl/ssl.h")
+            set(OPENSSL_ROOT_DIR "${_ssl_hint}" CACHE PATH "OpenSSL root directory")
+            break()
+        endif()
+    endforeach()
+endif()
+set(OPENSSL_USE_STATIC_LIBS TRUE)
+find_package(OpenSSL REQUIRED)
+
 # ASIO and websocketpp are header-only, just populate them
 FetchContent_GetProperties(asio)
 if(NOT asio_POPULATED)
@@ -98,6 +112,9 @@ target_link_libraries(${TARGET} PUBLIC
     ValiJSON::valijson
 )
 
+# OpenSSL (required for TLS/wss support)
+target_link_libraries(${TARGET} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+
 # Windows sockets (required by ASIO/websocketpp)
 target_link_libraries(${TARGET} PRIVATE ws2_32 crypt32)
 
@@ -107,7 +124,6 @@ target_compile_definitions(${TARGET} PRIVATE
     _WEBSOCKETPP_CPP11_STL_
     _WEBSOCKETPP_CPP11_THREAD_
     WSWRAP_WITH_WEBSOCKETPP
-    WSWRAP_NO_SSL
     WSWRAP_NO_COMPRESSION
     _WIN32_WINNT=0x0601
     WIN32_LEAN_AND_MEAN

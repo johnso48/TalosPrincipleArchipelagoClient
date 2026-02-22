@@ -98,11 +98,16 @@ private:
     /// Shape enum value → single letter.
     static char ShapeToLetter(uint8_t shape);
 
-    /// Set an actor visible (show).
-    static void SetActorVisible(RC::Unreal::UObject* actor);
+    /// Set an actor visible (show). Returns false if the UObject is stale
+    /// (world tearing down), signalling the caller to abort.
+    static bool SetActorVisible(RC::Unreal::UObject* actor);
 
-    /// Set an actor hidden (hide).
-    static void SetActorHidden(RC::Unreal::UObject* actor);
+    /// Set an actor hidden (hide). Returns false if the UObject is stale.
+    static bool SetActorHidden(RC::Unreal::UObject* actor);
+
+    /// Returns false when the game world is being torn down (no PlayerController).
+    /// Callers should abort all UObject work when this returns false.
+    static bool IsWorldValid();
 
     /// Check if an actor is currently hidden.
     static bool IsActorHidden(RC::Unreal::UObject* actor);
