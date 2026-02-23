@@ -68,6 +68,18 @@ static const std::vector<std::string> ALL_PURPLE_SIGILS = {
 };
 
 // ============================================================
+// Bonus Puzzles (ES/EL/EO prefix, order matches AP world definition)
+// ============================================================
+static const std::vector<std::string> ALL_BONUS_PUZZLES = {
+    // World A Bonus
+    "ES1",  "ES3",  "EL1",
+    // World B Bonus
+    "ES2",  "EL2",  "EL3",
+    // World C Bonus
+    "ES4",  "EL4",  "EO1",
+};
+
+// ============================================================
 // Stars (SL/SZ prefix, order matches AP world definition)
 // ============================================================
 static const std::vector<std::string> ALL_STARS = {
@@ -131,6 +143,9 @@ ItemMapping::ItemMapping()
         {0x540012, "NS"},  // Red S
         {0x540013, "HL"},  // Purple Sigil
         {0x540014, "**"},  // Star
+        {0x540015, "ES"},  // White S (Bonus Puzzle)
+        {0x540016, "EL"},  // White L (Bonus Puzzle)
+        {0x540017, "EO"},  // White O (Bonus Puzzle)
     };
 
     // Display names
@@ -145,6 +160,9 @@ ItemMapping::ItemMapping()
         {"NS", "Red S"},
         {"HL", "Purple Sigil"},
         {"**", "Star"},
+        {"ES", "White S"},
+        {"EL", "White L"},
+        {"EO", "White O"},
     };
 
     BuildTables();
@@ -164,6 +182,7 @@ void ItemMapping::BuildSequences()
     };
     addSequences(ALL_TETROMINOES);
     addSequences(ALL_PURPLE_SIGILS);
+    addSequences(ALL_BONUS_PUZZLES);
     // Note: ALL_STARS is NOT added here — it's only used for location IDs.
     // Stars use a unified "**" sequence for item resolution.
 
@@ -213,6 +232,14 @@ void ItemMapping::BuildTables()
         int64_t locId = BASE_LOCATION_ID + idx;
         m_locationNameToId[starId] = locId;
         m_locationIdToName[locId] = starId;
+        ++idx;
+    }
+
+    // Bonus puzzle locations (continue sequential IDs after stars)
+    for (const auto& bonusId : ALL_BONUS_PUZZLES) {
+        int64_t locId = BASE_LOCATION_ID + idx;
+        m_locationNameToId[bonusId] = locId;
+        m_locationIdToName[locId] = bonusId;
         ++idx;
     }
 
@@ -346,6 +373,12 @@ std::vector<int64_t> ItemMapping::GetAllItemIds() const
 bool ItemMapping::IsPurpleSigil(const std::string& id)
 {
     return id.size() >= 3 && id[0] == 'H' && id[1] == 'L';
+}
+
+bool ItemMapping::IsBonusPuzzle(const std::string& id)
+{
+    if (id.size() < 3 || id[0] != 'E') return false;
+    return id[1] == 'S' || id[1] == 'L' || id[1] == 'O';
 }
 
 bool ItemMapping::IsStar(const std::string& id)

@@ -57,6 +57,9 @@ public:
     /// Returns true if the given ID is a star (SL or SZ prefix).
     static bool IsStar(const std::string& id);
 
+    /// Returns true if the given ID is a bonus puzzle (ES, EL, or EO prefix).
+    static bool IsBonusPuzzle(const std::string& id);
+
     /// Convert a mod-internal ID (e.g. "SL5") to the game's TMap key format
     /// (e.g. "**5"). Returns the input unchanged for non-star IDs.
     std::string ToGameKey(const std::string& modId) const;

@@ -191,6 +191,9 @@ void InventorySync::EnforceCollectionState(ModState& state, const ItemMapping& i
             // Skip stars if they are not randomised
             if (!state.RandomiseStars && ItemMapping::IsStar(modId)) continue;
 
+            // Skip bonus puzzles if they are not randomised
+            if (!state.RandomiseBonusPuzzles && ItemMapping::IsBonusPuzzle(modId)) continue;
+
             // Stars are stored in GrantedItems as game keys ("**N"),
             // not as mod IDs ("SL5"). Check accordingly.
             const std::string& lookupKey = ItemMapping::IsStar(modId) ? gameKey : modId;

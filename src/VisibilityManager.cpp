@@ -797,16 +797,18 @@ void VisibilityManager::ProcessPendingFenceOpens()
                 if (!fence) continue;
                 try {
                     if (fence->GetFullName() == entry.fenceFullName) {
-                        Output::send<LogLevel::Warning>(
-                            STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
-                            std::wstring(entry.tetId.begin(), entry.tetId.end()));
-                        // Don't retry — world is likely tearing down
-                        return;
+                        fence->ProcessEvent(m_fnFenceOpen, nullptr);
                         opened = true;
                         break;
                     }
                 }
-                catch (...) {}
+                catch (...) {
+                    Output::send<LogLevel::Warning>(
+                        STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
+                        std::wstring(entry.tetId.begin(), entry.tetId.end()));
+                    // Don't retry — world is likely tearing down
+                    return;
+                }
             }
         }
         catch (...) {}

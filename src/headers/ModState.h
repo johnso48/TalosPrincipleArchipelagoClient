@@ -45,6 +45,10 @@ struct ModState {
     /// inventory-enforced. When false, stars are left untouched.
     bool RandomiseStars = false;
 
+    /// When true, bonus puzzles (ES/EL/EO) are randomised and should be
+    /// inventory-enforced. When false, bonus puzzles are left untouched.
+    bool RandomiseBonusPuzzles = false;
+
     /// Deferred flags — set by hooks, processed by the update loop.
     bool NeedsProgressRefresh = true;
 

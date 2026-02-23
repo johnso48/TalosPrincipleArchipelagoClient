@@ -198,6 +198,12 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
             Output::send<LogLevel::Verbose>(STR("[TalosAP] randomise_stars = {}\n"),
                 m_state->RandomiseStars ? L"true" : L"false");
         }
+        if (slotData.contains("randomise_bonus_puzzles")) {
+            int val = slotData["randomise_bonus_puzzles"].get<int>();
+            m_state->RandomiseBonusPuzzles = (val != 0);
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] randomise_bonus_puzzles = {}\n"),
+                m_state->RandomiseBonusPuzzles ? L"true" : L"false");
+        }
 
         // Mark AP as synced — enforcement can now begin
         m_state->APSynced = true;
