@@ -186,6 +186,18 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
             Output::send<LogLevel::Verbose>(STR("[TalosAP] reusable_tetrominos = {}\n"),
                 m_state->ReusableTetrominos ? L"true" : L"false");
         }
+        if (slotData.contains("randomise_purple_sigils")) {
+            int val = slotData["randomise_purple_sigils"].get<int>();
+            m_state->RandomisePurpleSigils = (val != 0);
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] randomise_purple_sigils = {}\n"),
+                m_state->RandomisePurpleSigils ? L"true" : L"false");
+        }
+        if (slotData.contains("randomise_stars")) {
+            int val = slotData["randomise_stars"].get<int>();
+            m_state->RandomiseStars = (val != 0);
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] randomise_stars = {}\n"),
+                m_state->RandomiseStars ? L"true" : L"false");
+        }
 
         // Mark AP as synced — enforcement can now begin
         m_state->APSynced = true;

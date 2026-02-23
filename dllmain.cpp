@@ -168,7 +168,7 @@ public:
         if (m_state.PendingInventoryDump.exchange(false)) {
             Output::send<LogLevel::Verbose>(STR("[TalosAP] === F6 Inventory Dump ===\n"));
             TalosAP::InventorySync::FindProgressObject(m_state);
-            TalosAP::InventorySync::DumpCollectedTetrominos(m_state);
+            TalosAP::InventorySync::DumpCollectedTetrominos(m_state, *m_itemMapping);
             m_visibilityManager.DumpTracked();
             m_visibilityManager.DumpFenceMap();
         }
@@ -240,7 +240,7 @@ public:
             // stale at any time due to Unreal GC.
             TalosAP::InventorySync::FindProgressObject(m_state);
             if (m_state.CurrentProgress) {
-                TalosAP::InventorySync::EnforceCollectionState(m_state);
+                TalosAP::InventorySync::EnforceCollectionState(m_state, *m_itemMapping);
             }
         }
     }

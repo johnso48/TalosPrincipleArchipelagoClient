@@ -55,10 +55,7 @@ struct TextSegment {
 //
 // Creates a UUserWidget with a CanvasPanel root. Each notification
 // is a HorizontalBox containing TextBlock children for colored
-// segments. Max 12 visible lines, 6-second expiry, auto-scroll.
-//
-// CRITICAL: No UObject* is cached across ticks. The widget is
-// re-created if lost (e.g. after level transitions).
+// segments. Max 12 visible lines, 12-second expiry, auto-scroll.
 //
 // Public API:
 //   Init()                             — cache UMG UClass pointers
@@ -69,8 +66,8 @@ struct TextSegment {
 // ============================================================
 class HudNotification {
 public:
-    static constexpr int   MAX_VISIBLE    = 15;
-    static constexpr float DEFAULT_DURATION = 6.0f;   // seconds
+    static constexpr int   MAX_VISIBLE    = 12;
+    static constexpr float DEFAULT_DURATION = 20.0f;   // seconds
     static constexpr float START_X        = 40.0f;
     static constexpr float START_Y        = 400.0f;
     static constexpr float LINE_SPACING   = 34.0f;

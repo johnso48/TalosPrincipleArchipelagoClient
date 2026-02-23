@@ -159,7 +159,7 @@ void InventorySync::RevokeItem(ModState& state, const std::string& tetrominoId)
 // EnforceCollectionState
 // ============================================================
 
-void InventorySync::EnforceCollectionState(ModState& state)
+void InventorySync::EnforceCollectionState(ModState& state, const ItemMapping& itemMapping)
 {
     if (!state.CurrentProgress) return;
     if (!state.APSynced) return;
@@ -167,13 +167,35 @@ void InventorySync::EnforceCollectionState(ModState& state)
     auto* tmap = GetCollectedTetrominosMap(state.CurrentProgress);
     if (!tmap) return;
 
-    // Phase 1: Find items in TMap that are NOT granted — these must be removed
-    std::vector<std::string> toRemove;
+    // Phase 1: Find items in TMap that are NOT granted — these must be removed.
+    //          Items that are not recognised by ItemMapping are left untouched
+    //          so we don't strip content added by the base game or other mods.
+    //
+    //          TMap keys use the game's native encoding (e.g. stars are "**5"
+    //          not "SL5"). We translate via FromGameKey before checking.
+    std::vector<std::string> toRemoveGameKeys;
     try {
         for (auto& pair : *tmap) {
-            std::string key = FromFString(pair.Key);
-            if (!key.empty() && state.GrantedItems.count(key) == 0) {
-                toRemove.push_back(key);
+            std::string gameKey = FromFString(pair.Key);
+            if (gameKey.empty()) continue;
+
+            // Translate game TMap key to mod ID
+            std::string modId = itemMapping.FromGameKey(gameKey);
+
+            // Skip items we don't recognise — they aren't ours to manage
+            if (itemMapping.GetLocationId(modId) < 0) continue;
+
+            // Skip purple sigils if they are not randomised
+            if (!state.RandomisePurpleSigils && ItemMapping::IsPurpleSigil(modId)) continue;
+
+            // Skip stars if they are not randomised
+            if (!state.RandomiseStars && ItemMapping::IsStar(modId)) continue;
+
+            // Stars are stored in GrantedItems as game keys ("**N"),
+            // not as mod IDs ("SL5"). Check accordingly.
+            const std::string& lookupKey = ItemMapping::IsStar(modId) ? gameKey : modId;
+            if (state.GrantedItems.count(lookupKey) == 0) {
+                toRemoveGameKeys.push_back(gameKey);
             }
         }
     }
@@ -182,12 +204,12 @@ void InventorySync::EnforceCollectionState(ModState& state)
         return;
     }
 
-    // Remove non-granted items from TMap
-    if (!toRemove.empty()) {
+    // Remove non-granted items from TMap (using game-format keys)
+    if (!toRemoveGameKeys.empty()) {
         int removed = 0;
-        for (const auto& id : toRemove) {
+        for (const auto& gk : toRemoveGameKeys) {
             try {
-                FString key = ToFString(id);
+                FString key = ToFString(gk);
                 tmap->Remove(key);
                 ++removed;
             }
@@ -197,14 +219,15 @@ void InventorySync::EnforceCollectionState(ModState& state)
         }
         if (removed > 0) {
             Output::send<LogLevel::Verbose>(STR("[TalosAP] Enforced: removed {}/{} non-granted items from TMap\n"),
-                removed, toRemove.size());
+                removed, toRemoveGameKeys.size());
         }
     }
 
-    // Phase 2: Ensure all granted items are in TMap
+    // Phase 2: Ensure all granted items are in TMap (using game-format keys)
     for (const auto& id : state.GrantedItems) {
         try {
-            FString key = ToFString(id);
+            std::string gameKey = itemMapping.ToGameKey(id);
+            FString key = ToFString(gameKey);
             bool* existing = tmap->Find(key);
             if (!existing) {
                 tmap->Add(key, false);
@@ -214,6 +237,7 @@ void InventorySync::EnforceCollectionState(ModState& state)
             // Individual add failed, continue
         }
     }
+
 
     // Phase 3: Reusable tetrominos — reset "used" flag
     if (state.ReusableTetrominos) {
@@ -247,7 +271,7 @@ void InventorySync::RefreshUI()
 // DumpCollectedTetrominos
 // ============================================================
 
-void InventorySync::DumpCollectedTetrominos(ModState& state)
+void InventorySync::DumpCollectedTetrominos(ModState& state, const ItemMapping& itemMapping)
 {
     if (!state.CurrentProgress) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] No progress object for dump\n"));
@@ -264,10 +288,30 @@ void InventorySync::DumpCollectedTetrominos(ModState& state)
 
     try {
         for (auto& pair : *tmap) {
-            std::string key = FromFString(pair.Key);
+            // Read raw wchar values for hex dump
+            const wchar_t* raw = *pair.Key;
+            std::wstring hexStr;
+            std::wstring readableStr;
+            if (raw) {
+                for (int ci = 0; raw[ci] != 0; ++ci) {
+                    wchar_t wc = raw[ci];
+                    // Hex representation
+                    wchar_t hexBuf[8];
+                    swprintf(hexBuf, 8, L"%02X ", (unsigned int)wc);
+                    hexStr += hexBuf;
+                    // Readable representation (printable or '.')
+                    readableStr += (wc >= 0x20 && wc < 0x7F) ? wc : L'.';
+                }
+            }
             bool used = pair.Value;
-            Output::send<LogLevel::Verbose>(STR("[TalosAP]   {} = {}\n"),
-                std::wstring(key.begin(), key.end()),
+            // Translate game key to mod ID for readability
+            std::string narrowKey = FromFString(pair.Key);
+            std::string modId = itemMapping.FromGameKey(narrowKey);
+            std::wstring modIdW(modId.begin(), modId.end());
+            Output::send<LogLevel::Verbose>(STR("[TalosAP]   [{}] \"{}\" ({}) = {}\n"),
+                hexStr,
+                readableStr,
+                modIdW,
                 used ? STR("true (used)") : STR("false (unused)"));
         }
     }

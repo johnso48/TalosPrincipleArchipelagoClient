@@ -58,44 +58,24 @@ static const std::vector<std::string> ALL_TETROMINOES = {
 };
 
 // ============================================================
-// Stars (puzzle code → star ID)
+// Purple Sigils (HL1 - HL24)
 // ============================================================
-struct StarEntry {
-    std::string puzzleCode;
-    std::string starId;
+static const std::vector<std::string> ALL_PURPLE_SIGILS = {
+    "HL1",  "HL2",  "HL3",  "HL4",  "HL5",  "HL6",
+    "HL7",  "HL8",  "HL9",  "HL10", "HL11", "HL12",
+    "HL13", "HL14", "HL15", "HL16", "HL17", "HL18",
+    "HL19", "HL20", "HL21", "HL22", "HL23", "HL24",
 };
 
-static const std::vector<StarEntry> ALL_STARS = {
-    {"SCentralArea_Chapter", "Star5"},
-    {"SCloud_1_02",          "Star2"},
-    {"S015",                 "Star1"},
-    {"SCloud_1_03",          "Star3"},
-    {"S202b",                "Star4"},
-    {"S201",                 "Star7"},
-    {"S244",                 "Star6"},
-    {"SCloud_1_06",          "Star8"},
-    {"S209",                 "Star9"},
-    {"S205",                 "Star10"},
-    {"S213",                 "Star11"},
-    {"S300a",                "Star12"},
-    {"SCloud_2_04",          "Star24"},
-    {"S215",                 "Star13"},
-    {"SCloud_2_05",          "Star14"},
-    {"S301",                 "Star16"},
-    {"SCloud_2_07",          "Star15"},
-    {"SCloud_3_01",          "Star17"},
-    {"SIslands_01",          "Star26"},
-    {"SLevel05_Elevator",    "Star25"},
-    {"S403",                 "Star18"},
-    {"S318",                 "Star19"},
-    {"S408",                 "Star21"},
-    {"S405",                 "Star20"},
-    {"S328",                 "Star23"},
-    {"S404",                 "Star27"},
-    {"S309",                 "Star22"},
-    {"SNexus",               "Star28"},
-    {"S234",                 "Star29"},
-    {"S308",                 "Star30"},
+// ============================================================
+// Stars (SL/SZ prefix, order matches AP world definition)
+// ============================================================
+static const std::vector<std::string> ALL_STARS = {
+    "SL5",  "SL2",  "SZ3",  "SL1",  "SL4",  "SL7",
+    "SL6",  "SZ8",  "SL9",  "SL10", "SL11", "SL12",
+    "SL13", "SZ24", "SZ14", "SZ15", "SL16", "SL17",
+    "SL18", "SL19", "SL20", "SL21", "SL22", "SL23",
+    "SL27", "SL29", "SL30", "SZ26", "SL25", "SL28",
 };
 
 // ============================================================
@@ -128,7 +108,7 @@ static int ExtractNumber(const std::string& tetId)
 // ============================================================
 ItemMapping::ItemMapping()
 {
-    // AP item ID → prefix (19 types)
+    // AP item ID → prefix
     m_apItemIdToPrefix = {
         {0x540000, "DJ"},  // Green J
         {0x540001, "DZ"},  // Green Z
@@ -149,6 +129,8 @@ ItemMapping::ItemMapping()
         {0x540010, "NJ"},  // Red J
         {0x540011, "NO"},  // Red O
         {0x540012, "NS"},  // Red S
+        {0x540013, "HL"},  // Purple Sigil
+        {0x540014, "**"},  // Star
     };
 
     // Display names
@@ -161,6 +143,8 @@ ItemMapping::ItemMapping()
         {"NL", "Red L"},    {"NZ", "Red Z"},    {"NT", "Red T"},
         {"NI", "Red I"},    {"NJ", "Red J"},    {"NO", "Red O"},
         {"NS", "Red S"},
+        {"HL", "Purple Sigil"},
+        {"**", "Star"},
     };
 
     BuildTables();
@@ -170,18 +154,35 @@ void ItemMapping::BuildSequences()
 {
     m_tetrominoSequences.clear();
 
-    for (const auto& tetId : ALL_TETROMINOES) {
-        std::string prefix = ExtractPrefix(tetId);
-        if (!prefix.empty()) {
-            m_tetrominoSequences[prefix].push_back(tetId);
+    auto addSequences = [&](const std::vector<std::string>& ids) {
+        for (const auto& tetId : ids) {
+            std::string prefix = ExtractPrefix(tetId);
+            if (!prefix.empty()) {
+                m_tetrominoSequences[prefix].push_back(tetId);
+            }
         }
-    }
+    };
+    addSequences(ALL_TETROMINOES);
+    addSequences(ALL_PURPLE_SIGILS);
+    // Note: ALL_STARS is NOT added here — it's only used for location IDs.
+    // Stars use a unified "**" sequence for item resolution.
 
     // Sort each sequence by embedded number
     for (auto& [prefix, seq] : m_tetrominoSequences) {
         std::sort(seq.begin(), seq.end(), [](const std::string& a, const std::string& b) {
             return ExtractNumber(a) < ExtractNumber(b);
         });
+    }
+
+    // Build unified star sequence: **1, **2, ..., **30
+    // When AP sends a Star item, we just grant the next **N in order.
+    {
+        std::vector<std::string> starSeq;
+        starSeq.reserve(ALL_STARS.size());
+        for (int i = 1; i <= static_cast<int>(ALL_STARS.size()); ++i) {
+            starSeq.push_back("**" + std::to_string(i));
+        }
+        m_tetrominoSequences["**"] = std::move(starSeq);
     }
 }
 
@@ -199,16 +200,41 @@ void ItemMapping::BuildTables()
         ++idx;
     }
 
-    // Star locations (continue sequential IDs after tetrominoes)
-    for (const auto& entry : ALL_STARS) {
+    // Purple sigil locations (continue sequential IDs after tetrominoes)
+    for (const auto& sigId : ALL_PURPLE_SIGILS) {
         int64_t locId = BASE_LOCATION_ID + idx;
-        m_locationNameToId[entry.starId] = locId;
-        m_locationIdToName[locId] = entry.starId;
+        m_locationNameToId[sigId] = locId;
+        m_locationIdToName[locId] = sigId;
         ++idx;
     }
 
-    Output::send<LogLevel::Verbose>(STR("[TalosAP] Mappings built: {} locations, {} item types\n"),
-                                    idx, m_apItemIdToPrefix.size());
+    // Star locations (continue sequential IDs after purple sigils)
+    for (const auto& starId : ALL_STARS) {
+        int64_t locId = BASE_LOCATION_ID + idx;
+        m_locationNameToId[starId] = locId;
+        m_locationIdToName[locId] = starId;
+        ++idx;
+    }
+
+    BuildGameKeyMappings();
+
+    Output::send<LogLevel::Verbose>(STR("[TalosAP] Mappings built: {} locations, {} item types, {} game-key translations\n"),
+                                    idx, m_apItemIdToPrefix.size(), m_modIdToGameKey.size());
+}
+
+void ItemMapping::BuildGameKeyMappings()
+{
+    m_modIdToGameKey.clear();
+    m_gameKeyToModId.clear();
+
+    // Stars use "**{number}" in the game's TMap instead of "SL{n}"/"SZ{n}".
+    // The game stores Secret-type items with 0x2A ('*') for both type and shape.
+    for (const auto& starId : ALL_STARS) {
+        int num = ExtractNumber(starId);
+        std::string gameKey = "**" + std::to_string(num);
+        m_modIdToGameKey[starId] = gameKey;
+        m_gameKeyToModId[gameKey] = starId;
+    }
 }
 
 // ============================================================
@@ -315,6 +341,33 @@ std::vector<int64_t> ItemMapping::GetAllItemIds() const
     }
     std::sort(ids.begin(), ids.end());
     return ids;
+}
+
+bool ItemMapping::IsPurpleSigil(const std::string& id)
+{
+    return id.size() >= 3 && id[0] == 'H' && id[1] == 'L';
+}
+
+bool ItemMapping::IsStar(const std::string& id)
+{
+    if (id.size() < 3) return false;
+    // Stars stored in GrantedItems as "**N" (game-key format)
+    if (id[0] == '*' && id[1] == '*') return true;
+    // Stars referenced by location as "SL{n}" / "SZ{n}"
+    if (id[0] == 'S' && (id[1] == 'L' || id[1] == 'Z')) return true;
+    return false;
+}
+
+std::string ItemMapping::ToGameKey(const std::string& modId) const
+{
+    auto it = m_modIdToGameKey.find(modId);
+    return (it != m_modIdToGameKey.end()) ? it->second : modId;
+}
+
+std::string ItemMapping::FromGameKey(const std::string& gameKey) const
+{
+    auto it = m_gameKeyToModId.find(gameKey);
+    return (it != m_gameKeyToModId.end()) ? it->second : gameKey;
 }
 
 } // namespace TalosAP

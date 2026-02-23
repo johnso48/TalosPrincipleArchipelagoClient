@@ -37,6 +37,14 @@ struct ModState {
     /// TMap boolean so pieces can be placed into arrangers again.
     bool ReusableTetrominos = false;
 
+    /// When true, purple sigils (HL1-HL24) are randomised and should be
+    /// inventory-enforced. When false, sigils are left untouched.
+    bool RandomisePurpleSigils = false;
+
+    /// When true, stars (SL/SZ) are randomised and should be
+    /// inventory-enforced. When false, stars are left untouched.
+    bool RandomiseStars = false;
+
     /// Deferred flags — set by hooks, processed by the update loop.
     bool NeedsProgressRefresh = true;
 

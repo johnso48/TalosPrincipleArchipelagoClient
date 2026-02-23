@@ -29,14 +29,15 @@ public:
 
     /// Enforce collection state: sync TMap with GrantedItems.
     /// Removes non-granted items, ensures granted items are present.
+    /// Items not recognised by ItemMapping are left untouched.
     /// Blocked until state.APSynced is true.
-    static void EnforceCollectionState(ModState& state);
+    static void EnforceCollectionState(ModState& state, const ItemMapping& itemMapping);
 
     /// Refresh the in-game tetromino UI (arranger panels, HUD counters).
     static void RefreshUI();
 
     /// Dump current TMap contents to the log for debugging.
-    static void DumpCollectedTetrominos(ModState& state);
+    static void DumpCollectedTetrominos(ModState& state, const ItemMapping& itemMapping);
 };
 
 } // namespace TalosAP

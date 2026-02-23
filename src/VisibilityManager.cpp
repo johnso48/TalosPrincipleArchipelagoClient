@@ -10,33 +10,9 @@
 
 #include <vector>
 #include <cmath>
-#include <excpt.h>   // EXCEPTION_EXECUTE_HANDLER (SEH)
 
 using namespace RC;
 using namespace RC::Unreal;
-
-// ============================================================
-// SEH-protected ProcessEvent wrapper
-//
-// During level transitions, Unreal GC can destroy UObjects while
-// we hold pointers to them.  UFunction native function pointers
-// become garbage, causing access violations inside ProcessEvent.
-// C++ try/catch does NOT catch these (SEH exceptions under /EHsc).
-//
-// This function MUST remain free of C++ objects with non-trivial
-// destructors on the stack — MSVC forbids mixing __try with them.
-// ============================================================
-static bool SafeProcessEvent(UObject* target, UFunction* func, void* params)
-{
-    if (!target || !func) return false;
-    __try {
-        target->ProcessEvent(func, params);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
 
 namespace TalosAP {
 
@@ -213,10 +189,7 @@ bool VisibilityManager::SetActorVisible(UObject* actor)
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = true;
         params.bPropagateToChildren = true;
-        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
-            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: ProcessEvent(SetVisibility) caught stale object — aborting\n"));
-            return false;
-        }
+        rootComp->ProcessEvent(setVisFunc, &params);
     }
 
     // SetHiddenInGame(false) — root only, do NOT propagate.
@@ -225,10 +198,7 @@ bool VisibilityManager::SetActorVisible(UObject* actor)
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = false;
         params.bPropagateToChildren = true;
-        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
-            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: ProcessEvent(SetHiddenInGame) caught stale object — aborting\n"));
-            return false;
-        }
+        rootComp->ProcessEvent(setHiddenFunc, &params);
     }
 
     return true;
@@ -247,10 +217,7 @@ bool VisibilityManager::SetActorHidden(UObject* actor)
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = false;
         params.bPropagateToChildren = true;
-        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
-            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: ProcessEvent(SetVisibility) caught stale object — aborting\n"));
-            return false;
-        }
+        rootComp->ProcessEvent(setVisFunc, &params);
     }
 
     auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
@@ -258,10 +225,7 @@ bool VisibilityManager::SetActorHidden(UObject* actor)
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = true;
         params.bPropagateToChildren = true;
-        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
-            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: ProcessEvent(SetHiddenInGame) caught stale object — aborting\n"));
-            return false;
-        }
+        rootComp->ProcessEvent(setHiddenFunc, &params);
     }
 
     return true;
@@ -833,13 +797,11 @@ void VisibilityManager::ProcessPendingFenceOpens()
                 if (!fence) continue;
                 try {
                     if (fence->GetFullName() == entry.fenceFullName) {
-                        if (!SafeProcessEvent(fence, m_fnFenceOpen, nullptr)) {
-                            Output::send<LogLevel::Warning>(
-                                STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
-                                std::wstring(entry.tetId.begin(), entry.tetId.end()));
-                            // Don't retry — world is likely tearing down
-                            return;
-                        }
+                        Output::send<LogLevel::Warning>(
+                            STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
+                            std::wstring(entry.tetId.begin(), entry.tetId.end()));
+                        // Don't retry — world is likely tearing down
+                        return;
                         opened = true;
                         break;
                     }
