@@ -313,6 +313,22 @@ void VisibilityManager::ScanLevel(ModState& state)
 
     // Build fence map (tetId → LoweringFence actor) for this level
     BuildFenceMap();
+
+    // Queue deferred opens for fences whose tetromino was already checked.
+    // 20-tick delay at ~100ms per tick ≈ 2 seconds, giving the level time
+    // to fully load before we call Open().
+    int deferredFences = 0;
+    for (const auto& [tetId, fenceName] : m_fenceMap) {
+        if (state.IsLocationChecked(tetId)) {
+            OpenFenceForTetromino(tetId, 20);
+            ++deferredFences;
+        }
+    }
+    if (deferredFences > 0) {
+        Output::send<LogLevel::Verbose>(
+            STR("[TalosAP] Visibility: queued {} deferred fence open(s) for already-checked locations\n"),
+            deferredFences);
+    }
 }
 
 // ============================================================
@@ -740,7 +756,7 @@ void VisibilityManager::BuildFenceMap()
 // OpenFenceForTetromino — queue a fence open for the given tetromino
 // ============================================================
 
-void VisibilityManager::OpenFenceForTetromino(const std::string& tetId)
+void VisibilityManager::OpenFenceForTetromino(const std::string& tetId, int delayTicks)
 {
     auto it = m_fenceMap.find(tetId);
     if (it == m_fenceMap.end()) return;
@@ -749,10 +765,16 @@ void VisibilityManager::OpenFenceForTetromino(const std::string& tetId)
     entry.tetId = tetId;
     entry.fenceFullName = it->second;
     entry.attempts = 0;
+    entry.delayTicks = delayTicks;
     m_pendingFenceOpens.push_back(entry);
 
-    Output::send<LogLevel::Verbose>(STR("[TalosAP] FenceMap: queued fence open for {}\n"),
-        std::wstring(tetId.begin(), tetId.end()));
+    if (delayTicks > 0) {
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] FenceMap: queued deferred fence open for {} (delay={} ticks)\n"),
+            std::wstring(entry.tetId.begin(), entry.tetId.end()), delayTicks);
+    } else {
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] FenceMap: queued fence open for {}\n"),
+            std::wstring(entry.tetId.begin(), entry.tetId.end()));
+    }
 }
 
 // ============================================================
@@ -785,6 +807,13 @@ void VisibilityManager::ProcessPendingFenceOpens()
     std::deque<PendingFenceOpen> remaining;
 
     for (auto& entry : m_pendingFenceOpens) {
+        // Wait out the initial delay (each decrement = ~100ms)
+        if (entry.delayTicks > 0) {
+            --entry.delayTicks;
+            remaining.push_back(entry);
+            continue;
+        }
+
         bool opened = false;
 
         try {
@@ -806,8 +835,6 @@ void VisibilityManager::ProcessPendingFenceOpens()
                     Output::send<LogLevel::Warning>(
                         STR("[TalosAP] FenceMap: ProcessEvent(Open) caught stale object for {}\n"),
                         std::wstring(entry.tetId.begin(), entry.tetId.end()));
-                    // Don't retry — world is likely tearing down
-                    return;
                 }
             }
         }

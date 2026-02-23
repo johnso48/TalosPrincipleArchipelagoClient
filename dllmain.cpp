@@ -178,16 +178,16 @@ public:
             Output::send<LogLevel::Verbose>(STR("[TalosAP] === F9: HUD notification test ===\n"));
             m_hud->Notify({
                 { L"Alice",         TalosAP::HudColors::PLAYER },
-                { L" sent you ",   TalosAP::HudColors::WHITE  },
+                { L" sent you a",   TalosAP::HudColors::WHITE  },
                 { L"Red L",         TalosAP::HudColors::TRAP   },
             });
             m_hud->Notify({
                 { L"Bob",           TalosAP::HudColors::PLAYER },
-                { L" sent you ",   TalosAP::HudColors::WHITE  },
+                { L" sent you a",   TalosAP::HudColors::WHITE  },
                 { L"Golden T",      TalosAP::HudColors::PROGRESSION },
             });
             m_hud->Notify({
-                { L"You found ",   TalosAP::HudColors::WHITE  },
+                { L"You found a",   TalosAP::HudColors::WHITE  },
                 { L"Green J",       TalosAP::HudColors::ITEM   },
             });
             m_hud->NotifySimple(L"AP Connected to server", TalosAP::HudColors::SERVER);

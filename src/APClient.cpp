@@ -292,7 +292,7 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
                     std::wstring wDisplay(displayName.begin(), displayName.end());
                     m_hud->Notify({
                         { wSender,          HudColors::PLAYER },
-                        { L" sent you ",    HudColors::WHITE  },
+                        { L" sent you a ",    HudColors::WHITE  },
                         { wDisplay,         itemColor         },
                     });
                 }
@@ -305,7 +305,7 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
                     LinearColor itemColor = ColorForFlags(flags);
                     std::wstring wDisplay(displayName.begin(), displayName.end());
                     m_hud->Notify({
-                        { L"You found ",  HudColors::WHITE },
+                        { L"You found a ",  HudColors::WHITE },
                         { wDisplay,       itemColor        },
                     });
                 }

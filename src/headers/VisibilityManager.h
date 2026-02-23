@@ -78,7 +78,9 @@ public:
 
     /// Open the puzzle exit fence for a tetromino (if one exists).
     /// Queues the open for retry processing.
-    void OpenFenceForTetromino(const std::string& tetId);
+    /// delayTicks: number of ProcessPendingFenceOpens() calls to wait before
+    /// attempting the open (each call is ~100ms, so 20 ≈ 2 seconds).
+    void OpenFenceForTetromino(const std::string& tetId, int delayTicks = 0);
 
     /// Process pending fence opens. Call every ~6 ticks from on_update.
     /// Retries each fence::Open() up to 10 times with ~100ms spacing.
@@ -141,6 +143,7 @@ private:
         std::string tetId;
         std::wstring fenceFullName;
         int attempts = 0;
+        int delayTicks = 0;  ///< Countdown before first attempt (each tick = ~100ms)
     };
     std::deque<PendingFenceOpen> m_pendingFenceOpens;
 
