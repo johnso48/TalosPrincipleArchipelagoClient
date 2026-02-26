@@ -36,6 +36,10 @@ public:
     /// Send goal completion status to the AP server.
     void SendGoalComplete();
 
+    /// Send a DeathLink bounce to all DeathLink-enabled players.
+    /// @param cause  Human-readable death cause (e.g. "Blown up by a mine")
+    void SendDeathLink(const std::string& cause);
+
     /// Check if the socket is connected.
     bool IsConnected() const { return m_connected; }
 

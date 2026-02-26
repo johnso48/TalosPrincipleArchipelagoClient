@@ -17,7 +17,7 @@ void SaveGameHandler::RegisterHooks(ModState& state)
             [](UnrealScriptFunctionCallableContext& ctx, void* data) {
                 auto* st = static_cast<ModState*>(data);
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: SetTalosSaveGameInstance\n"));
-                st->ResetForLevelTransition(15);
+                st->ResetForLevelTransition();
                 st->CheckedLocations.clear();
             },
             {},
@@ -37,7 +37,7 @@ void SaveGameHandler::RegisterHooks(ModState& state)
             [](UnrealScriptFunctionCallableContext& ctx, void* data) {
                 auto* st = static_cast<ModState*>(data);
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: ReloadSaveGame\n"));
-                st->ResetForLevelTransition(20);
+                st->ResetForLevelTransition();
                 st->CheckedLocations.clear();
             },
             {},

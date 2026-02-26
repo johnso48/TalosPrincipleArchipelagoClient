@@ -54,7 +54,15 @@ FetchContent_Declare(
     GIT_TAG        d0505e0ec53a26743f11051949a0dc66bcf44951
 )
 
-FetchContent_MakeAvailable(nlohmann_json valijson apclientpp wswrap)
+# zlib — compression (required by websocketpp permessage_deflate)
+FetchContent_Declare(
+    zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG        v1.3.1
+)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(nlohmann_json valijson apclientpp wswrap zlib)
 
 # OpenSSL — required for wss:// (TLS) connections
 # If OpenSSL is not found automatically, set OPENSSL_ROOT_DIR to your install path.
@@ -92,6 +100,7 @@ add_library(${TARGET} SHARED
     src/InventorySync.cpp
     src/LevelTransitionHandler.cpp
     src/SaveGameHandler.cpp
+    src/DeathLinkHandler.cpp
     src/VisibilityManager.cpp
     src/HudNotification.cpp
 )
@@ -104,6 +113,8 @@ target_include_directories(${TARGET} PRIVATE
     ${websocketpp_SOURCE_DIR}
     ${apclientpp_SOURCE_DIR}
     ${wswrap_SOURCE_DIR}/include
+    ${zlib_SOURCE_DIR}
+    ${zlib_BINARY_DIR}
 )
 
 target_link_libraries(${TARGET} PUBLIC
@@ -115,6 +126,9 @@ target_link_libraries(${TARGET} PUBLIC
 # OpenSSL (required for TLS/wss support)
 target_link_libraries(${TARGET} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
+# zlib (required by websocketpp permessage_deflate)
+target_link_libraries(${TARGET} PRIVATE zlibstatic)
+
 # Windows sockets (required by ASIO/websocketpp)
 target_link_libraries(${TARGET} PRIVATE ws2_32 crypt32)
 
@@ -124,7 +138,6 @@ target_compile_definitions(${TARGET} PRIVATE
     _WEBSOCKETPP_CPP11_STL_
     _WEBSOCKETPP_CPP11_THREAD_
     WSWRAP_WITH_WEBSOCKETPP
-    WSWRAP_NO_COMPRESSION
     _WIN32_WINNT=0x0601
     WIN32_LEAN_AND_MEAN
 )

@@ -10,6 +10,7 @@ struct Config {
     std::wstring password  = L"";
     std::wstring game      = L"The Talos Principle Reawakened";
     bool offline_mode      = false;
+    bool death_link        = false;
 
     // Narrow-string versions for apclientpp (which uses std::string)
     std::string server_str;

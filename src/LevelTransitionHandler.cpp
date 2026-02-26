@@ -17,7 +17,7 @@ void LevelTransitionHandler::RegisterHooks(ModState& state)
             [](UnrealScriptFunctionCallableContext& ctx, void* data) {
                 auto* st = static_cast<ModState*>(data);
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: ClientRestart\n"));
-                st->ResetForLevelTransition(15);
+                st->ResetForLevelTransition();
             },
             {},
             &state
@@ -36,7 +36,7 @@ void LevelTransitionHandler::RegisterHooks(ModState& state)
             [](UnrealScriptFunctionCallableContext& ctx, void* data) {
                 auto* st = static_cast<ModState*>(data);
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: OpenLevel\n"));
-                st->ResetForLevelTransition(50);
+                st->ResetForLevelTransition();
             },
             {},
             &state
@@ -55,7 +55,7 @@ void LevelTransitionHandler::RegisterHooks(ModState& state)
             [](UnrealScriptFunctionCallableContext& ctx, void* data) {
                 auto* st = static_cast<ModState*>(data);
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: OpenLevelBySoftObjectPtr\n"));
-                st->ResetForLevelTransition(50);
+                st->ResetForLevelTransition();
             },
             {},
             &state

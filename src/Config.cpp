@@ -122,6 +122,16 @@ void Config::Load(const std::wstring& modDir)
             auto val = j["offline_mode"].get<std::string>();
             offline_mode = (val == "true" || val == "1");
         }
+        if (j.contains("death_link")) {
+            if (j["death_link"].is_boolean()) {
+                death_link = j["death_link"].get<bool>();
+            } else if (j["death_link"].is_string()) {
+                auto val = j["death_link"].get<std::string>();
+                death_link = (val == "true" || val == "1");
+            } else if (j["death_link"].is_number_integer()) {
+                death_link = (j["death_link"].get<int>() != 0);
+            }
+        }
     }
     catch (const json::exception& e) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] config.json parse error: {}\n"),
@@ -138,6 +148,9 @@ void Config::Load(const std::wstring& modDir)
     Output::send<LogLevel::Verbose>(STR("[TalosAP]   game      = {}\n"), game);
     if (offline_mode) {
         Output::send<LogLevel::Verbose>(STR("[TalosAP]   offline_mode = true\n"));
+    }
+    if (death_link) {
+        Output::send<LogLevel::Verbose>(STR("[TalosAP]   death_link = true\n"));
     }
 }
 

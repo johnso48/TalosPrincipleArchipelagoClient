@@ -6,6 +6,7 @@
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 namespace TalosAP {
 
@@ -17,9 +18,10 @@ struct ModState {
     /// Re-acquired after each level load via FindProgressObject().
     RC::Unreal::UObject* CurrentProgress = nullptr;
 
-    /// Level transition cooldown (in ticks). While > 0, enforcement
-    /// and UObject access are skipped to avoid stale pointer crashes.
-    int LevelTransitionCooldown = 30;
+    /// Level transition cooldown. While active (time_point > now),
+    /// enforcement and UObject access are skipped to avoid stale pointer crashes.
+    /// A default-constructed time_point (epoch) means "no cooldown".
+    std::chrono::steady_clock::time_point LevelTransitionCooldownUntil{};
 
     /// Items granted by the AP server (tetromino ID → true).
     /// Source of truth for what should be in the CollectedTetrominos TMap.
@@ -62,6 +64,44 @@ struct ModState {
     /// Set by the F9 key handler; cleared after test notifications are queued.
     std::atomic<bool> PendingHudTest = false;
 
+    /// Set by the F10 key handler; spawns/teleports a mine to the player.
+    std::atomic<bool> PendingDebugSpawnMine = false;
+
+    // ===== DeathLink state =====
+
+    /// When true, a received DeathLink could not be fulfilled because the
+    /// current level has no mines.  The player sees an ominous HUD message
+    /// and will be killed on the NEXT level load (after the transition
+    /// cooldown expires and mines are available).
+    bool PendingDeferredDeathLink = false;
+
+    /// Whether DeathLink is enabled for this session (from config or slot_data).
+    bool DeathLinkEnabled = false;
+
+    /// Set by the SetDeath hook when the player dies from a non-DeathLink cause.
+    /// Consumed by the update loop to send a DeathLink bounce.
+    std::atomic<bool> PendingDeathLinkSend = false;
+
+    /// Set by the AP bounce handler when a DeathLink is received.
+    /// Consumed by the update loop to kill the player.
+    std::atomic<bool> PendingDeathLinkReceive = false;
+
+    /// True while we are inflicting a received DeathLink death.
+    /// Prevents the SetDeath hook from echoing it back as an outgoing DeathLink.
+    bool IsDeathLinkDeath = false;
+
+    /// Source player name from the last received DeathLink.
+    std::string DeathLinkSource;
+
+    /// Cause description from the last received DeathLink.
+    std::string DeathLinkCause;
+
+    /// Server timestamp of the last DeathLink we sent (for dedup).
+    double LastDeathLinkSentTime = 0.0;
+
+    /// Server timestamp of the last DeathLink we received (for dedup).
+    double LastDeathLinkRecvTime = 0.0;
+
     /// Mutex to protect state accessed from AP callback thread.
     /// AP callbacks push to pending queues under this lock;
     /// the game-thread update loop drains the queues.
@@ -82,11 +122,17 @@ struct ModState {
     bool PendingAPSyncComplete = false;
 
     /// Reset all cached UObject pointers and state for a level transition.
-    void ResetForLevelTransition(int cooldownTicks = 50) {
+    /// Cooldown is always 2500 ms of real wall-clock time.
+    void ResetForLevelTransition() {
         CurrentProgress = nullptr;
-        LevelTransitionCooldown = cooldownTicks;
+        LevelTransitionCooldownUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
         NeedsProgressRefresh = true;
         NeedsTetrominoScan = true;
+    }
+
+    /// Check whether the level transition cooldown is still active.
+    bool IsInLevelTransitionCooldown() const {
+        return std::chrono::steady_clock::now() < LevelTransitionCooldownUntil;
     }
 
     /// Reset checked locations (e.g. on new session or reconnect).

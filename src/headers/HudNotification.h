@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <chrono>
 #include <cstdint>
 
 namespace TalosAP {
@@ -86,10 +87,9 @@ public:
                       const LinearColor& color = HudColors::WHITE,
                       float duration = DEFAULT_DURATION);
 
-    /// Called every tick from on_update. Manages widget lifecycle,
-    /// drains pending queue, and expires old entries.
-    /// ticksPerSecond: approximate tick rate (default 60).
-    void Tick(float deltaTicks = 1.0f, float ticksPerSecond = 60.0f);
+    /// Called periodically from on_update. Manages widget lifecycle,
+    /// drains pending queue, and expires old entries using real wall-clock time.
+    void Tick();
 
     /// Remove all visible entries and clear the pending queue.
     void Clear();
@@ -134,11 +134,10 @@ private:
     struct Entry {
         RC::Unreal::UObject* hbox = nullptr; // UHorizontalBox (NOT cached across ticks in theory,
                                               // but we own it and manage its lifetime)
-        float expireTime = 0.0f;              // timeAccum at which this expires
+        std::chrono::steady_clock::time_point expireTime{}; // wall-clock time at which this expires
     };
     std::deque<Entry> m_entries;
     int m_entryCounter = 0;
-    float m_timeAccum  = 0.0f;
 
     // ---- Pending queue ----
     struct PendingNotification {

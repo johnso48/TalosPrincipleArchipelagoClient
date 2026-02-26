@@ -122,11 +122,16 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
             m_config.slot_name);
 
         if (m_impl && m_impl->ap) {
+            // Build tags list — always include "AP"; add "DeathLink" if enabled
+            std::list<std::string> tags = {"AP"};
+            if (m_config.death_link) {
+                tags.push_back("DeathLink");
+            }
             m_impl->ap->ConnectSlot(
                 m_config.slot_name_str,
                 m_config.password_str,
                 7,  // items_handling: receive from all sources (0b111)
-                {"AP"},
+                tags,
                 {0, 5, 1}  // AP protocol version
             );
         }
@@ -203,6 +208,21 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
             m_state->RandomiseBonusPuzzles = (val != 0);
             Output::send<LogLevel::Verbose>(STR("[TalosAP] randomise_bonus_puzzles = {}\n"),
                 m_state->RandomiseBonusPuzzles ? L"true" : L"false");
+        }
+
+        // DeathLink: can be enabled via config or slot_data (server-side)
+        if (slotData.contains("death_link")) {
+            int val = slotData["death_link"].get<int>();
+            if (val != 0) m_config.death_link = true;
+        }
+        m_state->DeathLinkEnabled = m_config.death_link;
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] death_link = {}\n"),
+            m_state->DeathLinkEnabled ? L"true" : L"false");
+
+        // If DeathLink was enabled via slot_data but not in the original
+        // ConnectSlot tags, update the connection to include the tag.
+        if (m_state->DeathLinkEnabled && m_impl && m_impl->ap) {
+            m_impl->ap->ConnectUpdate(false, 0, true, {"AP", "DeathLink"});
         }
 
         // Mark AP as synced — enforcement can now begin
@@ -420,6 +440,49 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
         }
     });
 
+    // ============================================================
+    // Bounced — DeathLink and other bounce packets
+    // ============================================================
+    ap.set_bounced_handler([this](const json& data) {
+        if (!m_state || !m_state->DeathLinkEnabled) return;
+
+        // Check if this bounce has the "DeathLink" tag
+        bool isDeathLink = false;
+        if (data.contains("tags") && data["tags"].is_array()) {
+            for (const auto& tag : data["tags"]) {
+                if (tag.is_string() && tag.get<std::string>() == "DeathLink") {
+                    isDeathLink = true;
+                    break;
+                }
+            }
+        }
+        if (!isDeathLink) return;
+
+        // Extract the nested "data" object (DeathLink payload)
+        json payload = data.value("data", json::object());
+        double timestamp = payload.value("time", 0.0);
+        std::string source = payload.value("source", "Unknown");
+        std::string cause  = payload.value("cause", "");
+
+        // Dedup: ignore if this is our own death echoing back
+        if (m_state->LastDeathLinkSentTime > 0.0 &&
+            std::abs(timestamp - m_state->LastDeathLinkSentTime) < 1.5) {
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] DeathLink: Ignoring own echo (dt={:.2f}s)\n"),
+                std::abs(timestamp - m_state->LastDeathLinkSentTime));
+            return;
+        }
+
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] DeathLink: Received from '{}' cause='{}'\n"),
+            std::wstring(source.begin(), source.end()),
+            std::wstring(cause.begin(), cause.end()));
+
+        // Queue death for the game thread
+        m_state->DeathLinkSource = source;
+        m_state->DeathLinkCause  = cause;
+        m_state->LastDeathLinkRecvTime = timestamp;
+        m_state->PendingDeathLinkReceive.store(true);
+    });
+
     Output::send<LogLevel::Verbose>(STR("[TalosAP] AP client initialized, connection will start on poll()\n"));
     return true;
 }
@@ -465,6 +528,31 @@ void APClientWrapper::SendGoalComplete()
 
     m_impl->ap->StatusUpdate(APClient::ClientStatus::GOAL);
     Output::send<LogLevel::Verbose>(STR("[TalosAP] Sent goal completion!\n"));
+}
+
+void APClientWrapper::SendDeathLink(const std::string& cause)
+{
+    if (!m_impl || !m_impl->ap || !m_slotConnected) {
+        Output::send<LogLevel::Warning>(STR("[TalosAP] Cannot send DeathLink — not connected\n"));
+        return;
+    }
+
+    double now = m_impl->ap->get_server_time();
+    m_state->LastDeathLinkSentTime = now;
+
+    std::string playerName = GetPlayerName(m_playerSlot);
+
+    json data = {
+        {"time",   now},
+        {"source", playerName},
+        {"cause",  cause}
+    };
+
+    m_impl->ap->Bounce(data, {}, {}, {"DeathLink"});
+
+    Output::send<LogLevel::Verbose>(STR("[TalosAP] DeathLink: Sent death bounce (source='{}', cause='{}')\n"),
+        std::wstring(playerName.begin(), playerName.end()),
+        std::wstring(cause.begin(), cause.end()));
 }
 
 // ============================================================

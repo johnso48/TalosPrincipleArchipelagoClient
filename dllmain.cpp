@@ -17,6 +17,7 @@
 #include "src/headers/SaveGameHandler.h"
 #include "src/headers/VisibilityManager.h"
 #include "src/headers/HudNotification.h"
+#include "src/headers/DeathLinkHandler.h"
 
 #include <filesystem>
 
@@ -115,11 +116,17 @@ public:
             m_state.PendingHudTest.store(true);
         });
 
+        // F10: Debug spawn mine at player location
+        register_keydown_event(Input::Key::F10, [this]() {
+            m_state.PendingDebugSpawnMine.store(true);
+        });
+
         // ============================================================
         // Register hooks
         // ============================================================
         m_levelTransitionHandler.RegisterHooks(m_state);
         m_saveGameHandler.RegisterHooks(m_state);
+        m_deathLinkHandler.RegisterHooks(m_state);
 
         Output::send<LogLevel::Verbose>(STR("[TalosAP] Initialization complete\n"));
     }
@@ -141,18 +148,29 @@ public:
             m_apClient->Poll();
         }
 
-        // Tick HUD notification system (~12 ticks = 200ms)
+        // Tick HUD notification system (~12 ticks)
         if (m_hud && (m_tickCount % 12 == 0)) {
-            m_hud->Tick(12.0f, 60.0f);
+            m_hud->Tick();
         }
 
-        // Decrement level transition cooldown
-        if (m_state.LevelTransitionCooldown > 0) {
-            --m_state.LevelTransitionCooldown;
-            if (m_state.LevelTransitionCooldown == 0) {
-                Output::send<LogLevel::Verbose>(STR("[TalosAP] Level transition cooldown expired — resuming\n"));
-            }
+        // Level transition cooldown — real wall-clock time (10 s)
+        if (m_state.IsInLevelTransitionCooldown()) {
+            m_levelTransitionCooldownWasActive = true;
             return; // Skip all game-thread work during transitions
+        }
+
+        // Fire once when cooldown has just expired
+        if (m_levelTransitionCooldownWasActive) {
+            m_levelTransitionCooldownWasActive = false;
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] Level transition cooldown expired — resuming\n"));
+
+            // If a DeathLink was deferred because the previous level
+            // had no mines, re-trigger it now that we're in a new level.
+            if (m_state.PendingDeferredDeathLink && m_state.DeathLinkEnabled) {
+                m_state.PendingDeferredDeathLink = false;
+                m_state.PendingDeathLinkReceive.store(true);
+                Output::send<LogLevel::Verbose>(STR("[TalosAP] DeathLink: Re-triggering deferred death in new level\n"));
+            }
         }
 
         // Deferred progress refresh
@@ -161,6 +179,22 @@ public:
             TalosAP::InventorySync::FindProgressObject(m_state, true);
             if (m_state.CurrentProgress) {
                 Output::send<LogLevel::Verbose>(STR("[TalosAP] Deferred progress refresh complete\n"));
+            }
+        }
+
+        // ============================================================
+        // DeathLink: process incoming death (every tick, low cost)
+        // ============================================================
+        if (m_state.DeathLinkEnabled) {
+            m_deathLinkHandler.ProcessPendingDeathLink(m_state, m_hud.get());
+        }
+
+        // ============================================================
+        // DeathLink: send outgoing death
+        // ============================================================
+        if (m_state.PendingDeathLinkSend.exchange(false)) {
+            if (m_apClient && m_state.DeathLinkEnabled) {
+                m_apClient->SendDeathLink("Died in The Talos Principle");
             }
         }
 
@@ -178,19 +212,27 @@ public:
             Output::send<LogLevel::Verbose>(STR("[TalosAP] === F9: HUD notification test ===\n"));
             m_hud->Notify({
                 { L"Alice",         TalosAP::HudColors::PLAYER },
-                { L" sent you a",   TalosAP::HudColors::WHITE  },
+                { L" sent you a ",   TalosAP::HudColors::WHITE  },
                 { L"Red L",         TalosAP::HudColors::TRAP   },
             });
             m_hud->Notify({
                 { L"Bob",           TalosAP::HudColors::PLAYER },
-                { L" sent you a",   TalosAP::HudColors::WHITE  },
+                { L" sent you a ",   TalosAP::HudColors::WHITE  },
                 { L"Golden T",      TalosAP::HudColors::PROGRESSION },
             });
             m_hud->Notify({
-                { L"You found a",   TalosAP::HudColors::WHITE  },
+                { L"You found a ",   TalosAP::HudColors::WHITE  },
                 { L"Green J",       TalosAP::HudColors::ITEM   },
             });
             m_hud->NotifySimple(L"AP Connected to server", TalosAP::HudColors::SERVER);
+        }
+
+        // ============================================================
+        // F10: Debug spawn mine at player
+        // ============================================================
+        if (m_state.PendingDebugSpawnMine.exchange(false)) {
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] === F10: Debug spawn mine ===\n"));
+            DebugSpawnMineAtPlayer();
         }
 
         // ============================================================
@@ -246,6 +288,164 @@ public:
     }
 
 private:
+    // ============================================================
+    // DebugSpawnMineAtPlayer — F10 debug helper
+    // ============================================================
+    // Attempts to spawn or teleport a mine right on top of the
+    // player so we can observe what happens.  Heavy logging.
+    void DebugSpawnMineAtPlayer()
+    {
+        try {
+            // ── 1. Find player pawn ────────────────────────────
+            auto* pc = UObjectGlobals::FindFirstOf(STR("PlayerController"));
+            if (!pc) {
+                Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] No PlayerController\n"));
+                return;
+            }
+            Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Found PlayerController\n"));
+
+            auto* pawnPtr = pc->GetValuePtrByPropertyNameInChain<UObject*>(STR("Pawn"));
+            if (!pawnPtr || !*pawnPtr) {
+                Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] No Pawn\n"));
+                return;
+            }
+            UObject* pawn = *pawnPtr;
+            Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Found Pawn at {}\n"), (void*)pawn);
+
+            // ── 2. Get player location ─────────────────────────
+            double px = 0, py = 0, pz = 0;
+            bool haveLocation = false;
+
+            // Method A: Read RootComponent->RelativeLocation property directly
+            try {
+                auto* rootCompPtr = pawn->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+                if (rootCompPtr && *rootCompPtr) {
+                    Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Found RootComponent at {}\n"), (void*)*rootCompPtr);
+                    auto* relLoc = (*rootCompPtr)->GetValuePtrByPropertyNameInChain<double>(STR("RelativeLocation"));
+                    if (relLoc) {
+                        px = relLoc[0];
+                        py = relLoc[1];
+                        pz = relLoc[2];
+                        haveLocation = true;
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Location via RelativeLocation: ({}, {}, {})\n"), px, py, pz);
+                    } else {
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] RelativeLocation property not found\n"));
+                    }
+                } else {
+                    Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] RootComponent not found\n"));
+                }
+            }
+            catch (...) {
+                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Exception reading RootComponent->RelativeLocation\n"));
+            }
+
+            // ── 3. Find existing mines in the level ────────────
+            const wchar_t* mineClasses[] = {
+                STR("BP_Mine_C"),
+                STR("BP_PassiveMine_C"),
+            };
+
+            std::vector<UObject*> foundMines;
+            const wchar_t* foundClassName = nullptr;
+            for (auto* cls : mineClasses) {
+                try {
+                    UObjectGlobals::FindAllOf(cls, foundMines);
+                    if (!foundMines.empty()) {
+                        foundClassName = cls;
+                        break;
+                    }
+                } catch (...) {}
+            }
+
+            if (!foundMines.empty()) {
+                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Found {} mine(s) of class '{}'\n"),
+                    foundMines.size(), std::wstring(foundClassName));
+
+                // Log mine positions via property reads (same pattern as VisibilityManager)
+                for (size_t i = 0; i < foundMines.size() && i < 3; ++i) {
+                    try {
+                        auto* mRoot = foundMines[i]->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+                        if (mRoot && *mRoot) {
+                            auto* mLoc = (*mRoot)->GetValuePtrByPropertyNameInChain<double>(STR("RelativeLocation"));
+                            if (mLoc) {
+                                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Mine[{}] at ({}, {}, {})\n"),
+                                    i, mLoc[0], mLoc[1], mLoc[2]);
+                            } else {
+                                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Mine[{}] no RelativeLocation\n"), i);
+                            }
+                        } else {
+                            Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Mine[{}] no RootComponent\n"), i);
+                        }
+                    } catch (...) {
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Mine[{}] exception reading location\n"), i);
+                    }
+                }
+            } else {
+                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] No mines found in current level\n"));
+            }
+
+            // ── 4. Teleport mine to player ────────────────────────
+            // Write RelativeLocation directly + flush via SetAbsolute toggle.
+            // This bypasses Angelscript entirely — the game's own tick will
+            // detect the overlap and trigger the mine's kill sequence.
+            if (!foundMines.empty() && haveLocation) {
+                UObject* mine = foundMines[0];
+                bool moved = false;
+
+                try {
+                    auto* mRootPtr = mine->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+                    if (mRootPtr && *mRootPtr) {
+                        UObject* mRoot = *mRootPtr;
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Mine RootComponent at {}\n"), (void*)mRoot);
+
+                        // Write RelativeLocation directly
+                        auto* mLoc = mRoot->GetValuePtrByPropertyNameInChain<double>(STR("RelativeLocation"));
+                        if (mLoc) {
+                            mLoc[0] = px;
+                            mLoc[1] = py;
+                            mLoc[2] = pz;
+                            Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] Wrote RelativeLocation = ({}, {}, {})\n"), px, py, pz);
+
+                            // Flush transform via SetAbsolute toggle
+                            auto* fnSetAbsolute = mRoot->GetFunctionByNameInChain(STR("SetAbsolute"));
+                            if (fnSetAbsolute) {
+                                {
+                                    alignas(16) uint8_t params[4] = {};
+                                    params[0] = 1; // bAbsoluteLocation = true
+                                    mRoot->ProcessEvent(fnSetAbsolute, params);
+                                }
+                                {
+                                    alignas(16) uint8_t params[4] = {};
+                                    params[0] = 0; // bAbsoluteLocation = false
+                                    mRoot->ProcessEvent(fnSetAbsolute, params);
+                                }
+                                moved = true;
+                                Output::send<LogLevel::Verbose>(STR("[TalosAP-Debug] SetAbsolute toggle succeeded — mine teleported\n"));
+                            } else {
+                                Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] SetAbsolute not found on RootComponent\n"));
+                            }
+                        } else {
+                            Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] Mine RelativeLocation property not found\n"));
+                        }
+                    } else {
+                        Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] Mine RootComponent not found\n"));
+                    }
+                }
+                catch (...) {
+                    Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] Exception in mine teleport\n"));
+                }
+
+                if (!moved) {
+                    Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] Could not teleport mine to player\n"));
+                }
+            }
+
+        }
+        catch (...) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP-Debug] Outer exception in DebugSpawnMineAtPlayer\n"));
+        }
+    }
+
     TalosAP::Config                            m_config;
     TalosAP::ModState                          m_state;
     std::unique_ptr<TalosAP::ItemMapping>      m_itemMapping;
@@ -253,9 +453,11 @@ private:
     std::unique_ptr<TalosAP::HudNotification>  m_hud;
     TalosAP::LevelTransitionHandler            m_levelTransitionHandler;
     TalosAP::SaveGameHandler                   m_saveGameHandler;
+    TalosAP::DeathLinkHandler                  m_deathLinkHandler;
     TalosAP::VisibilityManager                 m_visibilityManager;
     uint64_t                                   m_tickCount = 0;
     bool                                       m_shuttingDown = false;
+    bool                                       m_levelTransitionCooldownWasActive = false;
 };
 
 // ============================================================

@@ -462,7 +462,8 @@ void HudNotification::AddEntry(const std::vector<TextSegment>& segments, float d
     // 3. Append to entries
     Entry entry{};
     entry.hbox = hbox;
-    entry.expireTime = m_timeAccum + duration;
+    entry.expireTime = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(static_cast<int64_t>(duration * 1000.0f));
     m_entries.push_back(entry);
 
     // If we exceed MAX_VISIBLE, remove the oldest
@@ -525,9 +526,10 @@ void HudNotification::RepositionEntries()
 void HudNotification::ExpireTick()
 {
     bool changed = false;
+    auto now = std::chrono::steady_clock::now();
     auto it = m_entries.begin();
     while (it != m_entries.end()) {
-        if (m_timeAccum >= it->expireTime) {
+        if (now >= it->expireTime) {
             RemoveEntry(*it);
             it = m_entries.erase(it);
             changed = true;
@@ -583,16 +585,9 @@ void HudNotification::NotifySimple(const std::wstring& text, const LinearColor& 
 // ============================================================
 // Tick — called every game tick to drain queue and expire entries
 // ============================================================
-void HudNotification::Tick(float deltaTicks, float ticksPerSecond)
+void HudNotification::Tick()
 {
     if (!m_classesLoaded) return;
-
-    m_timeAccum += deltaTicks / ticksPerSecond;
-
-    // Only process HUD work every ~12 ticks (~200ms at 60fps) to match Lua's TICK_MS=200
-    // But we need the time accumulator to advance every tick for accurate expiry.
-    // Use a simple modulo on the integral tick count.
-    // Actually, we can just process every call since the caller (dllmain) rate-limits us.
 
     if (!EnsureWidgetVisible()) return;
 
