@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <atomic>
 #include <Mod/CppUserModBase.hpp>
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Input/Handler.hpp>
@@ -18,6 +19,7 @@
 #include "src/headers/VisibilityManager.h"
 #include "src/headers/HudNotification.h"
 #include "src/headers/DeathLinkHandler.h"
+#include "src/headers/GoalDetectionHandler.h"
 
 #include <filesystem>
 
@@ -43,7 +45,9 @@ public:
         // During engine teardown UObjects are freed while our tick
         // is still running — any FindAllOf / FindFirstOf call will
         // crash with an access violation (SEH, not catchable by C++).
-        m_shuttingDown = true;
+        // Note: The ReceiveShutdown hook should have already set this
+        // flag before UObject teardown began; this is a safety net.
+        m_shuttingDown.store(true);
     }
 
     // ============================================================
@@ -83,6 +87,7 @@ public:
 
         // Initialize HUD notification overlay
         m_hud = std::make_unique<TalosAP::HudNotification>();
+        m_hud->SetShutdownFlag(&m_shuttingDown);
         if (m_hud->Init()) {
             Output::send<LogLevel::Verbose>(STR("[TalosAP] HUD notification system initialized\n"));
         } else {
@@ -127,6 +132,27 @@ public:
         m_levelTransitionHandler.RegisterHooks(m_state);
         m_saveGameHandler.RegisterHooks(m_state);
         m_deathLinkHandler.RegisterHooks(m_state);
+        m_goalDetectionHandler.Init(m_state);
+
+        // ============================================================
+        // Hook: KismetSystemLibrary::QuitGame
+        // ============================================================
+        try {
+            UObjectGlobals::RegisterHook(
+                STR("/Script/Engine.KismetSystemLibrary:QuitGame"),
+                [](UnrealScriptFunctionCallableContext& ctx, void* data) {
+                    auto* flag = static_cast<std::atomic<bool>*>(data);
+                    flag->store(true);
+                    Output::send<LogLevel::Verbose>(STR("[TalosAP] Hook: QuitGame — disabling all UObject work\n"));
+                },
+                {},
+                &m_shuttingDown
+            );
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] Hooked: KismetSystemLibrary::QuitGame\n"));
+        }
+        catch (...) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] Failed to hook QuitGame\n"));
+        }
 
         Output::send<LogLevel::Verbose>(STR("[TalosAP] Initialization complete\n"));
     }
@@ -139,7 +165,7 @@ public:
         // Bail immediately if the engine is tearing down.
         // UObjects may already be freed — any FindAllOf/FindFirstOf
         // call would be an access violation.
-        if (m_shuttingDown) return;
+        if (m_shuttingDown.load()) return;
 
         ++m_tickCount;
 
@@ -283,6 +309,30 @@ public:
             TalosAP::InventorySync::FindProgressObject(m_state);
             if (m_state.CurrentProgress) {
                 TalosAP::InventorySync::EnforceCollectionState(m_state, *m_itemMapping);
+            }
+        }
+
+        // ============================================================
+        // Goal detection — deferred hooks + polling
+        // Tick handles the full lifecycle: warmup → hook registration → polling.
+        // ============================================================
+        if (m_tickCount % 60 == 0) {
+            m_goalDetectionHandler.Tick(m_state);
+        }
+
+        // ============================================================
+        // Goal completion: send to AP server (once)
+        // ============================================================
+        if (m_goalDetectionHandler.IsGoalCompleted() && !m_goalSent) {
+            m_goalSent = true;
+            if (m_hud) {
+                std::wstring msg = L"Goal Complete: " +
+                    std::wstring(m_goalDetectionHandler.GetCompletedGoalName().begin(),
+                                 m_goalDetectionHandler.GetCompletedGoalName().end());
+                m_hud->NotifySimple(msg, TalosAP::HudColors::SERVER);
+            }
+            if (m_apClient) {
+                m_apClient->SendGoalComplete();
             }
         }
     }
@@ -455,8 +505,10 @@ private:
     TalosAP::SaveGameHandler                   m_saveGameHandler;
     TalosAP::DeathLinkHandler                  m_deathLinkHandler;
     TalosAP::VisibilityManager                 m_visibilityManager;
+    TalosAP::GoalDetectionHandler              m_goalDetectionHandler;
     uint64_t                                   m_tickCount = 0;
-    bool                                       m_shuttingDown = false;
+    std::atomic<bool>                           m_shuttingDown{false};
+    bool                                       m_goalSent = false;
     bool                                       m_levelTransitionCooldownWasActive = false;
 };
 

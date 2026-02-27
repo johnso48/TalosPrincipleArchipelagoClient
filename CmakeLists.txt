@@ -101,6 +101,7 @@ add_library(${TARGET} SHARED
     src/LevelTransitionHandler.cpp
     src/SaveGameHandler.cpp
     src/DeathLinkHandler.cpp
+    src/GoalDetectionHandler.cpp
     src/VisibilityManager.cpp
     src/HudNotification.cpp
 )

@@ -7,6 +7,7 @@
 #include <deque>
 #include <chrono>
 #include <cstdint>
+#include <atomic>
 
 namespace TalosAP {
 
@@ -97,6 +98,11 @@ public:
     /// Check if the HUD system is initialized.
     bool IsInitialized() const { return m_classesLoaded; }
 
+    /// Provide a pointer to an external shutdown flag. When set to true,
+    /// all UObject work (Tick, Clear, etc.) is skipped to avoid accessing
+    /// freed pointers during engine teardown.
+    void SetShutdownFlag(std::atomic<bool>* flag) { m_shutdownFlag = flag; }
+
 private:
     // ---- UMG class pointers (cached, safe — UClass objects are persistent) ----
     RC::Unreal::UObject* m_userWidgetClass    = nullptr;
@@ -138,6 +144,10 @@ private:
     };
     std::deque<Entry> m_entries;
     int m_entryCounter = 0;
+
+    // ---- Shutdown guard ----
+    std::atomic<bool>* m_shutdownFlag = nullptr;
+    bool IsShuttingDown() const { return m_shutdownFlag && m_shutdownFlag->load(); }
 
     // ---- Pending queue ----
     struct PendingNotification {

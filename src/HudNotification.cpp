@@ -588,6 +588,7 @@ void HudNotification::NotifySimple(const std::wstring& text, const LinearColor& 
 void HudNotification::Tick()
 {
     if (!m_classesLoaded) return;
+    if (IsShuttingDown()) return;
 
     if (!EnsureWidgetVisible()) return;
 
@@ -617,8 +618,10 @@ void HudNotification::Clear()
 {
     m_pendingQueue.clear();
 
-    for (auto& entry : m_entries) {
-        RemoveEntry(entry);
+    if (!IsShuttingDown()) {
+        for (auto& entry : m_entries) {
+            RemoveEntry(entry);
+        }
     }
     m_entries.clear();
 }
