@@ -64,9 +64,6 @@ struct ModState {
     /// Set by the F9 key handler; cleared after test notifications are queued.
     std::atomic<bool> PendingHudTest = false;
 
-    /// Set by the F10 key handler; spawns/teleports a mine to the player.
-    std::atomic<bool> PendingDebugSpawnMine = false;
-
     // ===== DeathLink state =====
 
     /// When true, a received DeathLink could not be fulfilled because the

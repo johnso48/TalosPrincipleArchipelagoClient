@@ -104,6 +104,8 @@ add_library(${TARGET} SHARED
     src/GoalDetectionHandler.cpp
     src/VisibilityManager.cpp
     src/HudNotification.cpp
+    src/ModCore.cpp
+    src/DebugCommands.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE
