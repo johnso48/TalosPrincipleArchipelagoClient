@@ -2,5 +2,6 @@
     "server": "archipelago.gg:38281",
     "slot_name": "Player1",
     "password": "",
-    "game": "The Talos Principle Reawakened"
+    "game": "The Talos Principle Reawakened",
+	"death_link": false
 }
