@@ -8,9 +8,93 @@
 
 #include <vector>
 #include <string>
+#include <excpt.h>
 
 using namespace RC;
 using namespace RC::Unreal;
+
+// ============================================================
+// SEH-safe wrappers for UE4SS UObject iteration functions.
+// These iterate the global UObject array which may contain
+// stale/freed entries, causing access violations in
+// GetOutermost().  Standard C++ try/catch cannot catch SEH
+// exceptions under /EHsc.  These wrappers use __try/__except.
+//
+// CONSTRAINT: Functions using __try/__except must NOT have
+// local variables with C++ destructors.
+// ============================================================
+
+static UObject* SafeStaticFindObject(const wchar_t* path)
+{
+    __try {
+        return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, path);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static bool SafeFindAllOf(const wchar_t* className, std::vector<UObject*>& out)
+{
+    __try {
+        UObjectGlobals::FindAllOf(className, out);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static UObject* SafeFindFirstOf(const wchar_t* className)
+{
+    __try {
+        return UObjectGlobals::FindFirstOf(className);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// SEH-safe ProcessEvent wrapper.  Catches access violations caused by
+// stale/GC'd UObject pointers whose vtable points to freed memory.
+// Returns true if the call succeeded, false on SEH exception.
+static bool SafeProcessEvent(UObject* obj, UFunction* fn, void* params)
+{
+    __try {
+        obj->ProcessEvent(fn, params);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// SEH-safe GetFunctionByNameInChain wrapper.
+static UFunction* SafeGetFunctionByName(UObject* obj, const wchar_t* name)
+{
+    __try {
+        return obj->GetFunctionByNameInChain(name);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// SEH-safe GetFullName wrapper.  We can't assign to std::wstring
+// inside __try (C2712), so we grab the raw pointer under SEH and
+// SEH probe: validate a UObject pointer is still dereferenceable
+// by touching its vtable.  Returns false on access violation.
+static bool SafeProbeObject(UObject* obj)
+{
+    __try {
+        // Touch the vtable — if the object is stale this will AV
+        (void)obj->GetClassPrivate();
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 namespace TalosAP {
 
@@ -93,10 +177,14 @@ void GoalDetectionHandler::CheckGoals(ModState& state)
     // ---------------------------------------------------------
     try {
         std::vector<UObject*> allPlayers;
-        UObjectGlobals::FindAllOf(STR("BinkMediaPlayer"), allPlayers);
+        if (!SafeFindAllOf(STR("BinkMediaPlayer"), allPlayers)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] Goal: SEH exception in FindAllOf(BinkMediaPlayer) — stale UObject, will retry\n"));
+        }
 
         for (auto* player : allPlayers) {
             if (!player) continue;
+
+            if (!SafeProbeObject(player)) continue;
 
             std::wstring fullName;
             try {
@@ -140,51 +228,6 @@ void GoalDetectionHandler::CheckGoals(ModState& state)
     }
     catch (...) {
         // FindAllOf may fail if BinkMediaPlayer class doesn't exist
-    }
-
-    // ---------------------------------------------------------
-    // Transcendence: StaticFindObject for the LevelSequence.
-    // Only exists in memory when the ending package is loaded
-    // (i.e. the player triggered the ending). This covers both
-    // the hook-failed case AND the NotifyOnNewObject replacement.
-    // Always poll — even if the hook registered, it may not fire
-    // reliably in all scenarios.
-    // ---------------------------------------------------------
-    try {
-        auto* seq = UObjectGlobals::StaticFindObject<UObject*>(
-            nullptr, nullptr,
-            STR("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence"));
-
-        if (seq && HasEnoughSigils(state)) {
-            FireGoal("Transcendence", "Polling — Ending_Transcendence LevelSequence found in memory");
-            return;
-        }
-    }
-    catch (...) {
-        // StaticFindObject may not be available or throw
-    }
-
-    // ---------------------------------------------------------
-    // Secondary fallback: TalosSaveSubsystem:IsGameCompleted
-    // ---------------------------------------------------------
-    try {
-        auto* subsystem = UObjectGlobals::FindFirstOf(STR("TalosSaveSubsystem"));
-        if (subsystem) {
-            auto* fn = subsystem->GetFunctionByNameInChain(STR("IsGameCompleted"));
-            if (fn) {
-                // IsGameCompleted returns bool — use a small param buffer
-                struct { bool ReturnValue = false; } params;
-                subsystem->ProcessEvent(fn, &params);
-
-                if (params.ReturnValue && !m_previousGameCompleted) {
-                    FireGoal("Unknown (polling fallback)", "TalosSaveSubsystem:IsGameCompleted");
-                }
-                m_previousGameCompleted = params.ReturnValue;
-            }
-        }
-    }
-    catch (...) {
-        // TalosSaveSubsystem may not exist in all contexts
     }
 }
 

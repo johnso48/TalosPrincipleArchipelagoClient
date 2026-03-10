@@ -10,9 +10,69 @@
 
 #include <vector>
 #include <cmath>
+#include <excpt.h>
 
 using namespace RC;
 using namespace RC::Unreal;
+
+// ============================================================
+// SEH-safe wrappers for UObject operations.
+// Level streaming can unload sub-levels while FindAllOf still
+// returns actors from them — their components may already be
+// freed.  Calling ProcessEvent / GetFunctionByNameInChain on
+// such a stale pointer causes an access violation that C++
+// try/catch cannot intercept.
+// ============================================================
+
+// SEH-safe ProcessEvent.  Returns true on success.
+static bool SafeProcessEvent(UObject* obj, UFunction* fn, void* params)
+{
+    __try {
+        obj->ProcessEvent(fn, params);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// SEH-safe GetFunctionByNameInChain.  Returns nullptr on SEH exception.
+static UFunction* SafeGetFunction(UObject* obj, const wchar_t* name)
+{
+    __try {
+        return obj->GetFunctionByNameInChain(name);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// SEH-safe property read (bool).  Returns false if the read crashes.
+static bool SafeReadBoolProperty(UObject* obj, const wchar_t* propName, bool& outVal)
+{
+    __try {
+        auto* ptr = obj->GetValuePtrByPropertyNameInChain<bool>(propName);
+        if (!ptr) return false;
+        outVal = *ptr;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// SEH-safe RootComponent read.  Returns nullptr on SEH exception.
+static UObject* SafeGetRootComponent(UObject* actor)
+{
+    __try {
+        auto* ptr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+        if (!ptr || !*ptr) return nullptr;
+        return *ptr;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
 
 namespace TalosAP {
 
@@ -67,33 +127,28 @@ std::string VisibilityManager::FormatTetrominoId(uint8_t typeVal, uint8_t shapeV
 //       int32                Number;  // offset 0x4, size 0x4
 //   };                               // total size: 0x8
 
-bool VisibilityManager::ReadInstanceInfo(UObject* actor, uint8_t& outType, uint8_t& outShape, int32_t& outNumber)
+// SEH-safe InstanceInfo read on a potentially-stale actor.
+static bool SafeReadInstanceInfo(UObject* actor, uint8_t& outType, uint8_t& outShape, int32_t& outNumber)
 {
-    if (!actor) return false;
-
-    try {
-        // InstanceInfo is a struct property on BP_TetrominoItem_C.
-        // In the Talos header dump, "class ATetrominoItem" doesn't exist directly—
-        // BP_TetrominoItem_C is an Angelscript-generated Blueprint class.
-        // The InstanceInfo property holds FTetrominoInstanceInfo which is:
-        //   Type (uint8), Shape (uint8), padding, Number (int32) = 8 bytes total.
-        //
-        // GetValuePtrByPropertyNameInChain returns a pointer to the first byte
-        // of the struct's storage.
+    __try {
         auto* infoPtr = actor->GetValuePtrByPropertyNameInChain<uint8_t>(STR("InstanceInfo"));
         if (!infoPtr) return false;
 
-        // Read the fields at their known offsets within the struct
-        outType  = infoPtr[0];   // offset 0x0
-        outShape = infoPtr[1];   // offset 0x1
-        // offset 0x4 (int32, after 2 bytes of padding)
+        outType   = infoPtr[0];
+        outShape  = infoPtr[1];
         outNumber = *reinterpret_cast<int32_t*>(infoPtr + 4);
 
         return (outType != 0 && outShape != 0 && outNumber > 0);
     }
-    catch (...) {
+    __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+bool VisibilityManager::ReadInstanceInfo(UObject* actor, uint8_t& outType, uint8_t& outShape, int32_t& outNumber)
+{
+    if (!actor) return false;
+    return SafeReadInstanceInfo(actor, outType, outShape, outNumber);
 }
 
 // ============================================================
@@ -104,14 +159,10 @@ bool VisibilityManager::ReadActorPosition(UObject* actor, float& outX, float& ou
 {
     if (!actor) return false;
 
+    UObject* rootComp = SafeGetRootComponent(actor);
+    if (!rootComp) return false;
+
     try {
-        // AActor has a RootComponent (USceneComponent*) which has RelativeLocation (FVector).
-        // In UE4SS, we can chain through the property names.
-        auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-        if (!rootCompPtr || !*rootCompPtr) return false;
-
-        UObject* rootComp = *rootCompPtr;
-
         // RelativeLocation is an FVector — in UE5 this is 3 doubles (24 bytes),
         // NOT 3 floats. Reading as float gives garbage from misaligned half-values.
         auto* locPtr = rootComp->GetValuePtrByPropertyNameInChain<double>(STR("RelativeLocation"));
@@ -178,27 +229,29 @@ bool VisibilityManager::SetActorVisible(UObject* actor)
 {
     if (!actor) return false;
 
-    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-    if (!rootCompPtr || !*rootCompPtr) return false;
-    UObject* rootComp = *rootCompPtr;
+    UObject* rootComp = SafeGetRootComponent(actor);
+    if (!rootComp) return false;
 
-    // Propagation interferes with the game's animation system and
-    // collection sequence (mesh fade, particle despawn).
-    auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
+    auto* setVisFunc = SafeGetFunction(rootComp, STR("SetVisibility"));
     if (setVisFunc) {
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = true;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setVisFunc, &params);
+        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: SEH exception in ProcessEvent(SetVisibility) — stale component\n"));
+            return false;
+        }
     }
 
-    // SetHiddenInGame(false) — root only, do NOT propagate.
-    auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
+    auto* setHiddenFunc = SafeGetFunction(rootComp, STR("SetHiddenInGame"));
     if (setHiddenFunc) {
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = false;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setHiddenFunc, &params);
+        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorVisible: SEH exception in ProcessEvent(SetHiddenInGame) — stale component\n"));
+            return false;
+        }
     }
 
     return true;
@@ -208,24 +261,29 @@ bool VisibilityManager::SetActorHidden(UObject* actor)
 {
     if (!actor) return false;
 
-    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-    if (!rootCompPtr || !*rootCompPtr) return false;
-    UObject* rootComp = *rootCompPtr;
+    UObject* rootComp = SafeGetRootComponent(actor);
+    if (!rootComp) return false;
 
-    auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
+    auto* setVisFunc = SafeGetFunction(rootComp, STR("SetVisibility"));
     if (setVisFunc) {
         struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
         params.bNewVisibility = false;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setVisFunc, &params);
+        if (!SafeProcessEvent(rootComp, setVisFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: SEH exception in ProcessEvent(SetVisibility) — stale component\n"));
+            return false;
+        }
     }
 
-    auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
+    auto* setHiddenFunc = SafeGetFunction(rootComp, STR("SetHiddenInGame"));
     if (setHiddenFunc) {
         struct { bool NewHidden; bool bPropagateToChildren; } params{};
         params.NewHidden = true;
         params.bPropagateToChildren = true;
-        rootComp->ProcessEvent(setHiddenFunc, &params);
+        if (!SafeProcessEvent(rootComp, setHiddenFunc, &params)) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] SetActorHidden: SEH exception in ProcessEvent(SetHiddenInGame) — stale component\n"));
+            return false;
+        }
     }
 
     return true;
@@ -234,17 +292,14 @@ bool VisibilityManager::SetActorHidden(UObject* actor)
 bool VisibilityManager::IsActorHidden(UObject* actor)
 {
 
-    // Check Root SceneComponent visibility state (matches our SetActorVisible/Hidden).
-    // bVisible=false or bHiddenInGame=true means the item is hidden.
-    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-    if (!rootCompPtr || !*rootCompPtr) return false;
-    UObject* rootComp = *rootCompPtr;
+    UObject* rootComp = SafeGetRootComponent(actor);
+    if (!rootComp) return false;
 
-    auto* visiblePtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bVisible"));
-    if (visiblePtr && !*visiblePtr) return true;
+    bool bVisible = true;
+    if (SafeReadBoolProperty(rootComp, STR("bVisible"), bVisible) && !bVisible) return true;
 
-    auto* hiddenPtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bHiddenInGame"));
-    if (hiddenPtr && *hiddenPtr) return true;
+    bool bHidden = false;
+    if (SafeReadBoolProperty(rootComp, STR("bHiddenInGame"), bHidden) && bHidden) return true;
 
     return false;
 }
@@ -408,7 +463,9 @@ void VisibilityManager::RefreshVisibility(ModState& state)
 void VisibilityManager::EnforceVisibility(
     ModState& state,
     const ItemMapping& itemMapping,
-    const std::function<void(int64_t)>& locationCheckCallback)
+    const std::function<void(int64_t)>& locationCheckCallback,
+    bool enforceVis,
+    bool proximityPickup)
 {
     if (m_tracked.empty()) return;
 
@@ -458,7 +515,7 @@ void VisibilityManager::EnforceVisibility(
             // Only enforce visibility while retries remain — once they expire,
             // stop fighting the game so animations and collection work normally.
             // Retries are set at scan/refresh time, NOT reset here.
-            if (tt.visRetries > 0) {
+            if (enforceVis && tt.visRetries > 0) {
                 if (IsActorHidden(actor)) {
                     if (!SetActorVisible(actor)) {
                         Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object detected, aborting pass\n"));
@@ -471,7 +528,7 @@ void VisibilityManager::EnforceVisibility(
             // Proximity pickup detection — only when item is confirmed visible.
             // Without this guard, proximity fires on invisible items (e.g. items
             // the game hid because they're in the CollectedTetrominos TMap).
-            if (hasPlayerPos && tt.hasPosition && !tt.reported && !IsActorHidden(actor)) {
+            if (proximityPickup && hasPlayerPos && tt.hasPosition && !tt.reported && !IsActorHidden(actor)) {
                 float dx = playerX - tt.x;
                 float dy = playerY - tt.y;
                 float dz = playerZ - tt.z;
@@ -506,9 +563,11 @@ void VisibilityManager::EnforceVisibility(
             // Location has been checked — hide the actor regardless of grant state.
             // If granted to us: we already have it, no need to show the world item.
             // If granted to another player: same, hide it.
-            if (!SetActorHidden(actor)) {
-                Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on checked hide, aborting pass\n"));
-                return;
+            if (enforceVis) {
+                if (!SetActorHidden(actor)) {
+                    Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on checked hide, aborting pass\n"));
+                    return;
+                }
             }
         }
     }
@@ -826,8 +885,13 @@ void VisibilityManager::ProcessPendingFenceOpens()
                 if (!fence) continue;
                 try {
                     if (fence->GetFullName() == entry.fenceFullName) {
-                        fence->ProcessEvent(m_fnFenceOpen, nullptr);
-                        opened = true;
+                        if (SafeProcessEvent(fence, m_fnFenceOpen, nullptr)) {
+                            opened = true;
+                        } else {
+                            Output::send<LogLevel::Warning>(
+                                STR("[TalosAP] FenceMap: SEH exception in ProcessEvent(Open) for {} — stale fence\n"),
+                                std::wstring(entry.tetId.begin(), entry.tetId.end()));
+                        }
                         break;
                     }
                 }

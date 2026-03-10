@@ -150,8 +150,8 @@ if(MSVC)
     target_compile_options(${TARGET} PRIVATE /Zc:__cplusplus /bigobj)
 endif()
 
-# C++20 for UE4SS compatibility
-target_compile_features(${TARGET} PRIVATE cxx_std_20)
+# C++23 for UE4SS compatibility
+target_compile_features(${TARGET} PRIVATE cxx_std_23)
 
 # Copy the DLL to the game's mod directory after building (optional, adjust path as needed)
 # add_custom_command(TARGET ${TARGET} POST_BUILD

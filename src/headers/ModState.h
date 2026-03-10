@@ -61,6 +61,9 @@ struct ModState {
     /// Set by the F6 key handler; cleared after DumpCollectedTetrominos fires.
     std::atomic<bool> PendingInventoryDump = false;
 
+    /// Set by the F7 key handler; cleared after door arrangers are opened.
+    std::atomic<bool> PendingOpenDoorArrangers = false;
+
     /// Set by the F9 key handler; cleared after test notifications are queued.
     std::atomic<bool> PendingHudTest = false;
 

@@ -36,6 +36,7 @@ public:
 
         // Key bindings must be registered on the CppUserModBase subclass
         register_keydown_event(Input::Key::F6, [this]() { m_core.OnKeyF6(); });
+        //register_keydown_event(Input::Key::F7, [this]() { m_core.OnKeyF7(); });
         register_keydown_event(Input::Key::F9, [this]() { m_core.OnKeyF9(); });
     }
 

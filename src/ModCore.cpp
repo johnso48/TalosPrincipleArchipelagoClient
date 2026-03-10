@@ -68,12 +68,16 @@ void ModCore::InitSubsystems(std::atomic<bool>& shuttingDown)
     Output::send<LogLevel::Verbose>(STR("[TalosAP] Item mappings built\n"));
 
     // HUD notification overlay
-    m_hud = std::make_unique<HudNotification>();
-    m_hud->SetShutdownFlag(&shuttingDown);
-    if (m_hud->Init()) {
-        Output::send<LogLevel::Verbose>(STR("[TalosAP] HUD notification system initialized\n"));
+    if (m_config.enable_hud) {
+        m_hud = std::make_unique<HudNotification>();
+        m_hud->SetShutdownFlag(&shuttingDown);
+        if (m_hud->Init()) {
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] HUD notification system initialized\n"));
+        } else {
+            Output::send<LogLevel::Warning>(STR("[TalosAP] HUD init deferred \u2014 UMG classes not yet available\n"));
+        }
     } else {
-        Output::send<LogLevel::Warning>(STR("[TalosAP] HUD init deferred — UMG classes not yet available\n"));
+        Output::send<LogLevel::Warning>(STR("[TalosAP] HUD DISABLED by config\n"));
     }
 
     // AP client (unless offline mode)
@@ -97,10 +101,27 @@ void ModCore::InitSubsystems(std::atomic<bool>& shuttingDown)
 // ============================================================
 void ModCore::RegisterHooks(std::atomic<bool>& shuttingDown)
 {
-    m_levelTransitionHandler.RegisterHooks(m_state);
-    m_saveGameHandler.RegisterHooks(m_state);
-    m_deathLinkHandler.RegisterHooks(m_state);
-    m_goalDetectionHandler.Init(m_state);
+    if (m_config.enable_level_transition_hooks) {
+        m_levelTransitionHandler.RegisterHooks(m_state);
+    } else {
+        Output::send<LogLevel::Warning>(STR("[TalosAP] LevelTransitionHandler hooks DISABLED by config\n"));
+    }
+
+    if (m_config.enable_save_hooks) {
+        m_saveGameHandler.RegisterHooks(m_state);
+    } else {
+        Output::send<LogLevel::Warning>(STR("[TalosAP] SaveGameHandler hooks DISABLED by config\n"));
+    }
+
+    if (m_config.death_link) {
+        m_deathLinkHandler.RegisterHooks(m_state);
+    }
+
+    if (m_config.enable_goal_detection) {
+        m_goalDetectionHandler.Init(m_state);
+    } else {
+        Output::send<LogLevel::Warning>(STR("[TalosAP] GoalDetectionHandler DISABLED by config\n"));
+    }
 
     // Hook: KismetSystemLibrary::QuitGame
     try {
@@ -129,32 +150,70 @@ void ModCore::Tick()
     // Bail immediately if the engine is tearing down.
     if (m_shuttingDown && m_shuttingDown->load()) return;
 
-    m_scheduler.Advance();
+    if (m_apPollThrottle.Ready()) PollAPClient();
 
-    // AP client must be polled every frame for responsive networking.
-    PollAPClient();
-
-    // Gate the rest of the loop at TICK_INTERVAL_MS (~200 ms wall-clock).
-    // Subsystems that need to run slower manage their own internal timers.
-    if (!m_scheduler.ShouldTick()) return;
-
-    if (m_hud) m_hud->Tick();
-
+    // Level transition cooldown blocks all game-thread subsystems.
     if (HandleLevelTransitionCooldown()) return;
 
-    ProcessDeferredProgressRefresh();
+    // ---- Flag-gated one-shots (cheap no-ops when flags are clear) ----
+    if (m_config.enable_inventory_sync) ProcessDeferredProgressRefresh();
     ProcessDeathLinks();
 
-    m_debugCommands.ProcessPending(m_state, *m_itemMapping,
-                                   m_visibilityManager, m_hud.get());
+    if (m_config.enable_debug_commands) {
+        m_debugCommands.ProcessPending(m_state, *m_itemMapping,
+                                       m_visibilityManager, m_hud.get());
+    }
 
-    ProcessTetrominoScan();
-    EnforceVisibilityAndPickups();
-    RefreshVisibility();
-    ProcessPendingFenceOpens();
-    EnforceCollectionState();
-    TickGoalDetection();
-    CheckGoalCompletion();
+    if (m_config.tetromino_handling.scan_for_new_tetrominos) {
+        ProcessTetrominoScan();
+    }
+
+    // ---- Throttled subsystems: enqueue when ready, execute one per frame ----
+    EnqueueThrottledWork();
+    m_workQueue.ProcessOne();
+}
+
+// ============================================================
+// EnqueueThrottledWork — check each throttle and push ready work
+// ============================================================
+void ModCore::EnqueueThrottledWork()
+{
+    if (m_config.enable_hud && m_hud && m_hudThrottle.Ready()) {
+        m_workQueue.Enqueue(Work_Hud, [this] {
+            m_hud->Tick();
+        });
+    }
+
+    if (m_visibilityThrottle.Ready()) {
+        m_workQueue.Enqueue(Work_Visibility, [this] {
+            if (m_config.tetromino_handling.enforce_visibility
+                || m_config.tetromino_handling.player_proximity_pickup) {
+                EnforceVisibilityAndPickups();
+            }
+            if (m_config.tetromino_handling.enforce_visibility) {
+                RefreshVisibility();
+            }
+        });
+    }
+
+    if (m_config.tetromino_handling.fence_opening && m_fenceThrottle.Ready()) {
+        m_workQueue.Enqueue(Work_FenceOpen, [this] {
+            ProcessPendingFenceOpens();
+        });
+    }
+
+    if (m_config.enable_inventory_sync && m_inventorySyncThrottle.Ready()) {
+        m_workQueue.Enqueue(Work_InventorySync, [this] {
+            EnforceCollectionState();
+        });
+    }
+
+    if (m_config.enable_goal_detection && m_goalThrottle.Ready()) {
+        m_workQueue.Enqueue(Work_GoalDetection, [this] {
+            TickGoalDetection();
+            CheckGoalCompletion();
+        });
+    }
 }
 
 // ============================================================
@@ -173,6 +232,7 @@ bool ModCore::HandleLevelTransitionCooldown()
     // Level transition cooldown — real wall-clock time
     if (m_state.IsInLevelTransitionCooldown()) {
         m_levelTransitionCooldownWasActive = true;
+        m_workQueue.Clear(); // Discard stale work from the previous level
         return true; // Skip all game-thread work during transitions
     }
 
@@ -236,7 +296,9 @@ void ModCore::EnforceVisibilityAndPickups()
                 if (m_apClient) {
                     m_apClient->SendLocationCheck(locationId);
                 }
-            });
+            },
+            m_config.tetromino_handling.enforce_visibility,
+            m_config.tetromino_handling.player_proximity_pickup);
     }
 }
 

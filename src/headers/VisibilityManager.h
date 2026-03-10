@@ -61,10 +61,14 @@ public:
     /// Uses the cached TrackedTetromino data. Lightweight.
     /// locationCheckCallback is called when a proximity pickup is detected,
     /// with the AP location ID as the argument.
+    /// enforceVis: when false, skip show/hide enforcement.
+    /// proximityPickup: when false, skip proximity-based pickup detection.
     void EnforceVisibility(
         ModState& state,
         const ItemMapping& itemMapping,
-        const std::function<void(int64_t)>& locationCheckCallback
+        const std::function<void(int64_t)>& locationCheckCallback,
+        bool enforceVis = true,
+        bool proximityPickup = true
     );
 
     /// Clear all cached data. Call on level transitions.

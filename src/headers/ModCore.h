@@ -10,7 +10,8 @@
 #include "DeathLinkHandler.h"
 #include "VisibilityManager.h"
 #include "GoalDetectionHandler.h"
-#include "TickScheduler.h"
+#include "Throttle.h"
+#include "ThrottledWorkQueue.h"
 #include "DebugCommands.h"
 
 #include <memory>
@@ -41,6 +42,7 @@ public:
 
     /// Immediate key-press handlers (called from key-down lambdas).
     void OnKeyF6() { m_state.PendingInventoryDump.store(true); }
+    void OnKeyF7() { m_state.PendingOpenDoorArrangers.store(true); }
     void OnKeyF9() { m_state.PendingHudTest.store(true); }
 
 private:
@@ -49,12 +51,22 @@ private:
     void InitSubsystems(std::atomic<bool>& shuttingDown);
     void RegisterHooks(std::atomic<bool>& shuttingDown);
 
+    // ---- Work-queue tags (one per throttled subsystem) ----
+    enum WorkTag {
+        Work_Hud,
+        Work_Visibility,
+        Work_FenceOpen,
+        Work_InventorySync,
+        Work_GoalDetection,
+    };
+
     // ---- Tick sub-steps (called from Tick()) ----
     void PollAPClient();
     bool HandleLevelTransitionCooldown();   ///< returns true → skip rest of tick
     void ProcessDeferredProgressRefresh();
     void ProcessDeathLinks();
     void ProcessTetrominoScan();
+    void EnqueueThrottledWork();            ///< check throttles and enqueue ready work
     void EnforceVisibilityAndPickups();
     void RefreshVisibility();
     void ProcessPendingFenceOpens();
@@ -74,7 +86,17 @@ private:
     VisibilityManager                 m_visibilityManager;
     GoalDetectionHandler              m_goalDetectionHandler;
     DebugCommands                     m_debugCommands;
-    TickScheduler                     m_scheduler;
+
+    // ---- Per-subsystem throttles (wall-clock, in ms) ----
+    Throttle                          m_apPollThrottle{500};
+    Throttle                          m_hudThrottle{200};
+    Throttle                          m_visibilityThrottle{200};
+    Throttle                          m_fenceThrottle{200};
+    Throttle                          m_inventorySyncThrottle{200};
+    Throttle                          m_goalThrottle{1000};
+
+    // ---- FIFO work queue (executes one item per frame) ----
+    ThrottledWorkQueue                m_workQueue;
 
     // ---- State ----
     std::atomic<bool>*                m_shuttingDown = nullptr;

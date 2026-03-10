@@ -132,6 +132,47 @@ void Config::Load(const std::wstring& modDir)
                 death_link = (j["death_link"].get<int>() != 0);
             }
         }
+
+        // Helper lambda: parse a JSON value as bool (supports bool, string, int)
+        auto parseBool = [&](const char* key, bool defaultVal) -> bool {
+            if (!j.contains(key)) return defaultVal;
+            const auto& v = j[key];
+            if (v.is_boolean()) return v.get<bool>();
+            if (v.is_string()) {
+                auto s = v.get<std::string>();
+                return (s == "true" || s == "1");
+            }
+            if (v.is_number_integer()) return v.get<int>() != 0;
+            return defaultVal;
+        };
+
+        // Feature toggles
+        // tetromino_handling is a nested object
+        if (j.contains("tetromino_handling") && j["tetromino_handling"].is_object()) {
+            const auto& th = j["tetromino_handling"];
+            auto parseBoolObj = [&](const json& obj, const char* key, bool defaultVal) -> bool {
+                if (!obj.contains(key)) return defaultVal;
+                const auto& v = obj[key];
+                if (v.is_boolean()) return v.get<bool>();
+                if (v.is_string()) {
+                    auto s = v.get<std::string>();
+                    return (s == "true" || s == "1");
+                }
+                if (v.is_number_integer()) return v.get<int>() != 0;
+                return defaultVal;
+            };
+            tetromino_handling.scan_for_new_tetrominos = parseBoolObj(th, "scan_for_new_tetrominos", true);
+            tetromino_handling.enforce_visibility      = parseBoolObj(th, "enforce_visibility", true);
+            tetromino_handling.player_proximity_pickup = parseBoolObj(th, "player_proximity_pickup", true);
+            tetromino_handling.fence_opening           = parseBoolObj(th, "fence_opening", true);
+        }
+
+        enable_goal_detection         = parseBool("enable_goal_detection", true);
+        enable_inventory_sync         = parseBool("enable_inventory_sync", true);
+        enable_hud                    = parseBool("enable_hud", true);
+        enable_debug_commands         = parseBool("enable_debug_commands", true);
+        enable_save_hooks             = parseBool("enable_save_hooks", true);
+        enable_level_transition_hooks = parseBool("enable_level_transition_hooks", true);
     }
     catch (const json::exception& e) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] config.json parse error: {}\n"),
@@ -152,6 +193,23 @@ void Config::Load(const std::wstring& modDir)
     if (death_link) {
         Output::send<LogLevel::Verbose>(STR("[TalosAP]   death_link = true\n"));
     }
+
+    // Log feature toggles (only log disabled ones to reduce noise)
+    auto logToggle = [](const wchar_t* name, bool val) {
+        if (!val) {
+            Output::send<LogLevel::Warning>(STR("[TalosAP]   {} = DISABLED\n"), name);
+        }
+    };
+    logToggle(STR("tetromino_handling.scan_for_new_tetrominos"), tetromino_handling.scan_for_new_tetrominos);
+    logToggle(STR("tetromino_handling.enforce_visibility"), tetromino_handling.enforce_visibility);
+    logToggle(STR("tetromino_handling.player_proximity_pickup"), tetromino_handling.player_proximity_pickup);
+    logToggle(STR("tetromino_handling.fence_opening"), tetromino_handling.fence_opening);
+    logToggle(STR("enable_goal_detection"), enable_goal_detection);
+    logToggle(STR("enable_inventory_sync"), enable_inventory_sync);
+    logToggle(STR("enable_hud"), enable_hud);
+    logToggle(STR("enable_debug_commands"), enable_debug_commands);
+    logToggle(STR("enable_save_hooks"), enable_save_hooks);
+    logToggle(STR("enable_level_transition_hooks"), enable_level_transition_hooks);
 }
 
 } // namespace TalosAP
