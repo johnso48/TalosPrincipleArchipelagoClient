@@ -45,6 +45,8 @@ public:
         bool  reported = false;     ///< True if proximity pickup already sent
         int   visRetries = 0;       ///< Remaining retries to force visibility
         bool  hasPosition = false;  ///< Whether position was successfully read
+        int   pendingHideDelay = 0; ///< Ticks to wait before hiding after proximity pickup
+        bool  fenceQueued = false;  ///< True if fence open already queued for this item
     };
 
     /// Scan the current level for all BP_TetrominoItem_C actors.

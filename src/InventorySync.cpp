@@ -10,6 +10,7 @@
 
 #include <vector>
 #include <string>
+#include <excpt.h>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -61,6 +62,56 @@ static TetrominoMap* GetCollectedTetrominosMap(UObject* progress)
 }
 
 // ============================================================
+// SEH-safe wrappers
+// ============================================================
+// UE4SS's FindFirstOf iterates the global UObject array and calls
+// IsA() on every entry, including pending-kill objects whose class
+// hierarchy pointers may already be stale.  This causes an access
+// violation (SEH) that C++ try/catch cannot intercept.
+// Wrap every UObject-touching call in __try/__except.
+
+static UObject* SEH_FindFirstOf(const wchar_t* className)
+{
+    __try {
+        return UObjectGlobals::FindFirstOf(className);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static UObject* SEH_StaticFindObject(const wchar_t* path)
+{
+    __try {
+        return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, path);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static bool SEH_ProcessEvent(UObject* obj, UFunction* fn, void* params)
+{
+    __try {
+        obj->ProcessEvent(fn, params);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static UFunction* SEH_GetFunctionByName(UObject* obj, const wchar_t* name)
+{
+    __try {
+        return obj->GetFunctionByNameInChain(name);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// ============================================================
 // FindProgressObject
 // ============================================================
 
@@ -72,47 +123,38 @@ void InventorySync::FindProgressObject(ModState& state, bool /*forceRefresh*/)
     // (SEH) that try/catch cannot intercept.
     state.CurrentProgress = nullptr;
 
-    try {
-        auto* cdo = UObjectGlobals::StaticFindObject<UObject*>(
-            nullptr, nullptr, STR("/Script/Talos.Default__TalosProgress"));
+    auto* cdo = SEH_StaticFindObject(STR("/Script/Talos.Default__TalosProgress"));
 
-        UObject* worldCtx = nullptr;
+    UObject* worldCtx = nullptr;
 
-        // Try PlayerController as world context
-        worldCtx = UObjectGlobals::FindFirstOf(STR("PlayerController"));
-        if (!worldCtx) {
-            // Fallback: GameInstance
-            worldCtx = UObjectGlobals::FindFirstOf(STR("TalosGameInstance"));
-        }
+    // Try PlayerController as world context
+    worldCtx = SEH_FindFirstOf(STR("PlayerController"));
+    if (!worldCtx) {
+        // Fallback: GameInstance
+        worldCtx = SEH_FindFirstOf(STR("TalosGameInstance"));
+    }
 
-        if (cdo && worldCtx) {
-            // Call UTalosProgress::Get(WorldContextObject)
-            auto* getFunc = cdo->GetFunctionByNameInChain(STR("Get"));
-            if (getFunc) {
-                struct {
-                    UObject* WorldContextObject;
-                    UObject* ReturnValue;
-                } params{};
-                params.WorldContextObject = worldCtx;
-                params.ReturnValue = nullptr;
+    if (cdo && worldCtx) {
+        // Call UTalosProgress::Get(WorldContextObject)
+        auto* getFunc = SEH_GetFunctionByName(cdo, STR("Get"));
+        if (getFunc) {
+            struct {
+                UObject* WorldContextObject;
+                UObject* ReturnValue;
+            } params{};
+            params.WorldContextObject = worldCtx;
+            params.ReturnValue = nullptr;
 
-                cdo->ProcessEvent(getFunc, &params);
-
-                if (params.ReturnValue) {
-                    // Verify we can read the TMap
-                    auto* tmap = GetCollectedTetrominosMap(params.ReturnValue);
-                    if (tmap) {
-                        state.CurrentProgress = params.ReturnValue;
-                        return;
-                    }
+            if (SEH_ProcessEvent(cdo, getFunc, &params) && params.ReturnValue) {
+                // Verify we can read the TMap
+                auto* tmap = GetCollectedTetrominosMap(params.ReturnValue);
+                if (tmap) {
+                    state.CurrentProgress = params.ReturnValue;
+                    return;
                 }
             }
         }
     }
-    catch (...) {
-        // Any failure in this process results in not having a progress object.
-    }
-    
 
     Output::send<LogLevel::Warning>(STR("[TalosAP] Could not find progress object\n"));
 }

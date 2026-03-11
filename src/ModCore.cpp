@@ -21,6 +21,7 @@ namespace TalosAP {
 void ModCore::Initialize(std::atomic<bool>& shuttingDown)
 {
     m_shuttingDown = &shuttingDown;
+    m_workQueue.SetShutdownFlag(&shuttingDown);
     Output::send<LogLevel::Verbose>(STR("[TalosAP] ModCore::Initialize — starting...\n"));
 
     LoadConfig(shuttingDown);

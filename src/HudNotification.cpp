@@ -10,6 +10,7 @@
 
 #include <cstring>
 #include <string>
+#include <excpt.h>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -201,7 +202,13 @@ bool HudNotification::CreateWidget()
 
     // Find a suitable outer — use the GameInstance or transient package
     // In Lua the outer was GameInstance; in C++ we can get it via FindFirstOf.
-    UObject* outer = UObjectGlobals::FindFirstOf(STR("GameInstance"));
+    UObject* outer = nullptr;
+    __try {
+        outer = UObjectGlobals::FindFirstOf(STR("GameInstance"));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        outer = nullptr;
+    }
     if (!outer) {
         Output::send<LogLevel::Warning>(STR("[TalosAP-HUD] GameInstance not found\n"));
         return false;

@@ -47,6 +47,30 @@ static UFunction* SafeGetFunction(UObject* obj, const wchar_t* name)
     }
 }
 
+// SEH-safe FindFirstOf.  Returns nullptr on SEH exception (e.g. pending-kill
+// objects with stale class pointers — UE4SS iterates them without checking).
+static UObject* SafeFindFirstOf(const wchar_t* className)
+{
+    __try {
+        return UObjectGlobals::FindFirstOf(className);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// SEH-safe FindAllOf.  Returns false on SEH exception.
+static bool SafeFindAllOf(const wchar_t* className, std::vector<UObject*>& out)
+{
+    __try {
+        UObjectGlobals::FindAllOf(className, out);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // SEH-safe property read (bool).  Returns false if the read crashes.
 static bool SafeReadBoolProperty(UObject* obj, const wchar_t* propName, bool& outVal)
 {
@@ -184,10 +208,10 @@ bool VisibilityManager::ReadActorPosition(UObject* actor, float& outX, float& ou
 
 bool VisibilityManager::GetPlayerPosition(float& outX, float& outY, float& outZ)
 {
-    try {
-        auto* pc = UObjectGlobals::FindFirstOf(STR("PlayerController"));
-        if (!pc) return false;
+    auto* pc = SafeFindFirstOf(STR("PlayerController"));
+    if (!pc) return false;
 
+    try {
         auto* pawnPtr = pc->GetValuePtrByPropertyNameInChain<UObject*>(STR("Pawn"));
         if (!pawnPtr || !*pawnPtr) return false;
 
@@ -205,14 +229,14 @@ bool VisibilityManager::GetPlayerPosition(float& outX, float& outY, float& outZ)
 
 bool VisibilityManager::IsWorldValid()
 {
-    try {
-        // During level teardown, FindFirstOf("PlayerController") returns
-        // nullptr (or the controller loses its Pawn).  Checking both is a
-        // lightweight signal that the world is still alive without relying
-        // on engine-internal members like UWorld* (not a UPROPERTY).
-        auto* pc = UObjectGlobals::FindFirstOf(STR("PlayerController"));
-        if (!pc) return false;
+    // During level teardown, FindFirstOf("PlayerController") returns
+    // nullptr (or the controller loses its Pawn).  Checking both is a
+    // lightweight signal that the world is still alive without relying
+    // on engine-internal members like UWorld* (not a UPROPERTY).
+    auto* pc = SafeFindFirstOf(STR("PlayerController"));
+    if (!pc) return false;
 
+    try {
         auto* pawnPtr = pc->GetValuePtrByPropertyNameInChain<UObject*>(STR("Pawn"));
         return pawnPtr && *pawnPtr;
     }
@@ -313,10 +337,7 @@ void VisibilityManager::ScanLevel(ModState& state)
     m_tracked.clear();
 
     std::vector<UObject*> items;
-    try {
-        UObjectGlobals::FindAllOf(STR("BP_TetrominoItem_C"), items);
-    }
-    catch (...) {
+    if (!SafeFindAllOf(STR("BP_TetrominoItem_C"), items)) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] Visibility: FindAllOf BP_TetrominoItem_C failed\n"));
         return;
     }
@@ -396,12 +417,7 @@ void VisibilityManager::RefreshVisibility(ModState& state)
     if (!IsWorldValid()) return;
 
     std::vector<UObject*> items;
-    try {
-        UObjectGlobals::FindAllOf(STR("BP_TetrominoItem_C"), items);
-    }
-    catch (...) {
-        return;
-    }
+    if (!SafeFindAllOf(STR("BP_TetrominoItem_C"), items)) return;
 
     if (items.empty()) return;
 
@@ -426,6 +442,8 @@ void VisibilityManager::RefreshVisibility(ModState& state)
         auto it = m_tracked.find(tetId);
         if (it != m_tracked.end()) {
             tt.reported = it->second.reported;
+            tt.pendingHideDelay = it->second.pendingHideDelay;
+            tt.fenceQueued = it->second.fenceQueued;
             // If we failed to read position this time, keep old position
             if (!tt.hasPosition && it->second.hasPosition) {
                 tt.x = it->second.x;
@@ -443,10 +461,14 @@ void VisibilityManager::RefreshVisibility(ModState& state)
             }
             tt.visRetries = 10; // lighter retries on refresh (~0.17s)
         } else if (state.IsLocationChecked(tetId)) {
-            // Already checked — hide regardless of grant state
-            if (!SetActorHidden(item)) {
-                Output::send<LogLevel::Warning>(STR("[TalosAP] RefreshVisibility: stale object detected, aborting pass\n"));
-                return;
+            // Already checked — hide regardless of grant state.
+            // But respect pendingHideDelay so a fresh proximity pickup
+            // can finish its animation before we yank visibility.
+            if (tt.pendingHideDelay <= 0) {
+                if (!SetActorHidden(item)) {
+                    Output::send<LogLevel::Warning>(STR("[TalosAP] RefreshVisibility: stale object detected, aborting pass\n"));
+                    return;
+                }
             }
         }
 
@@ -477,12 +499,7 @@ void VisibilityManager::EnforceVisibility(
     // Re-discover actors each enforcement tick so we have fresh UObject*.
     // This is necessary because Unreal GC can invalidate any cached pointer.
     std::vector<UObject*> items;
-    try {
-        UObjectGlobals::FindAllOf(STR("BP_TetrominoItem_C"), items);
-    }
-    catch (...) {
-        return;
-    }
+    if (!SafeFindAllOf(STR("BP_TetrominoItem_C"), items)) return;
 
     // Build a temporary ID → actor map for this tick
     std::unordered_map<std::string, UObject*> idToActor;
@@ -539,10 +556,11 @@ void VisibilityManager::EnforceVisibility(
                         std::wstring(id.begin(), id.end()), std::sqrt(distSq));
 
                     tt.reported = true;
-                    if (!SetActorHidden(actor)) {
-                        Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on pickup hide, aborting pass\n"));
-                        return;
-                    }
+
+                    // Defer hiding and fence-open by 2 ticks so the game
+                    // can finish its pickup animation / internal bookkeeping
+                    // before we yank the actor's visibility and open the gate.
+                    tt.pendingHideDelay = 2;
 
                     // Mark location as checked in state
                     state.MarkLocationChecked(id);
@@ -554,19 +572,26 @@ void VisibilityManager::EnforceVisibility(
                             locationCheckCallback(locId);
                         }
                     }
-
-                    // Open puzzle exit fence if one is mapped
-                    OpenFenceForTetromino(id);
                 }
             }
         } else if (state.IsLocationChecked(id)) {
             // Location has been checked — hide the actor regardless of grant state.
             // If granted to us: we already have it, no need to show the world item.
             // If granted to another player: same, hide it.
-            if (enforceVis) {
-                if (!SetActorHidden(actor)) {
-                    Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on checked hide, aborting pass\n"));
-                    return;
+            if (tt.pendingHideDelay > 0) {
+                --tt.pendingHideDelay;
+            } else {
+                if (enforceVis) {
+                    if (!SetActorHidden(actor)) {
+                        Output::send<LogLevel::Warning>(STR("[TalosAP] EnforceVisibility: stale object on checked hide, aborting pass\n"));
+                        return;
+                    }
+                }
+
+                // Open puzzle exit fence once after the delay expires
+                if (tt.reported && !tt.fenceQueued) {
+                    OpenFenceForTetromino(id);
+                    tt.fenceQueued = true;
                 }
             }
         }
@@ -619,16 +644,17 @@ void VisibilityManager::BuildFenceMap()
     // ----------------------------------------------------------------
     {
         std::vector<UObject*> scripts;
-        try { UObjectGlobals::FindAllOf(STR("LoweringFenceWhenTetrominoIsPickedUpBaseScript"), scripts); } catch (...) {}
-        try {
+        SafeFindAllOf(STR("LoweringFenceWhenTetrominoIsPickedUpBaseScript"), scripts);
+        {
             std::vector<UObject*> derived;
-            UObjectGlobals::FindAllOf(STR("LoweringFenceWhenTetrominoIsPickedUpScript"), derived);
-            for (auto* s : derived) {
-                bool dup = false;
-                for (auto* e : scripts) { if (e == s) { dup = true; break; } }
-                if (!dup) scripts.push_back(s);
+            if (SafeFindAllOf(STR("LoweringFenceWhenTetrominoIsPickedUpScript"), derived)) {
+                for (auto* s : derived) {
+                    bool dup = false;
+                    for (auto* e : scripts) { if (e == s) { dup = true; break; } }
+                    if (!dup) scripts.push_back(s);
+                }
             }
-        } catch (...) {}
+        }
 
         Output::send<LogLevel::Verbose>(STR("[TalosAP] FenceMap: {} LoweringFenceWhenTetromino script actors\n"), scripts.size());
 
@@ -690,7 +716,7 @@ void VisibilityManager::BuildFenceMap()
 
                         // Find matching fence by EntityID in Tags
                         std::vector<UObject*> allFences;
-                        try { UObjectGlobals::FindAllOf(STR("BP_LoweringFence_C"), allFences); } catch (...) {}
+                        SafeFindAllOf(STR("BP_LoweringFence_C"), allFences);
 
                         for (auto* candidate : allFences) {
                             if (!candidate || fence) continue;
@@ -759,7 +785,7 @@ void VisibilityManager::BuildFenceMap()
     // ----------------------------------------------------------------
     {
         std::vector<UObject*> eclipses;
-        try { UObjectGlobals::FindAllOf(STR("EclipseScript"), eclipses); } catch (...) {}
+        SafeFindAllOf(STR("EclipseScript"), eclipses);
 
         if (!eclipses.empty()) {
             Output::send<LogLevel::Verbose>(STR("[TalosAP] FenceMap: {} EclipseScript actors\n"), eclipses.size());
@@ -879,7 +905,7 @@ void VisibilityManager::ProcessPendingFenceOpens()
             // Re-discover the fence actor by iterating all LoweringFence instances
             // and matching by full name. This avoids caching stale UObject*.
             std::vector<UObject*> fences;
-            UObjectGlobals::FindAllOf(STR("LoweringFence"), fences);
+            SafeFindAllOf(STR("LoweringFence"), fences);
 
             for (auto* fence : fences) {
                 if (!fence) continue;
