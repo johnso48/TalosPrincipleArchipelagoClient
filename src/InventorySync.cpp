@@ -10,12 +10,16 @@
 
 #include <vector>
 #include <string>
+#include <unordered_set>
 #include <excpt.h>
 
 using namespace RC;
 using namespace RC::Unreal;
 
 namespace TalosAP {
+
+// Static member definition
+std::unordered_set<std::string> InventorySync::s_solvedPuzzleCache;
 
 // ============================================================
 // Helper: Convert narrow string to FString (wide)
@@ -105,6 +109,16 @@ static UFunction* SEH_GetFunctionByName(UObject* obj, const wchar_t* name)
 {
     __try {
         return obj->GetFunctionByNameInChain(name);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static UFunction* SEH_StaticFindFunction(const wchar_t* path)
+{
+    __try {
+        return UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, path);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
@@ -372,6 +386,121 @@ void InventorySync::DumpCollectedTetrominos(ModState& state, const ItemMapping& 
     Output::send<LogLevel::Verbose>(STR("[TalosAP] === Checked locations ({}) ===\n"), state.CheckedLocations.size());
     for (const auto& id : state.CheckedLocations) {
         Output::send<LogLevel::Verbose>(STR("[TalosAP]   {}\n"), std::wstring(id.begin(), id.end()));
+    }
+}
+
+// ============================================================
+// ResetCachedFunctions — call on level transition
+// ============================================================
+
+static UFunction* s_fnBoolSet        = nullptr;
+static bool       s_fnPuzzleResolved = false;
+
+void InventorySync::ResetCachedFunctions()
+{
+    s_fnBoolSet        = nullptr;
+    s_fnPuzzleResolved = false;
+    s_solvedPuzzleCache.clear();
+
+    Output::send<LogLevel::Verbose>(STR("[TalosAP] PuzzleSolve: Reset cached functions and puzzle cache\n"));
+}
+
+// ============================================================
+// Static tetromino → puzzle ID mapping (from BotPuzzleDatabase.csv)
+// ============================================================
+
+static const std::unordered_map<std::string, std::string>& GetTetrominoToPuzzleMap()
+{
+    static const std::unordered_map<std::string, std::string> map = {
+        // Regular puzzles: tetromino mod-ID → puzzle number
+        {"MT1",  "001"},  {"DJ3",  "011"},  {"DJ1",  "107"},  {"DJ2",  "006"},
+        {"DZ1",  "007"},  {"ML1",  "012"},  {"DI1",  "005"},  {"ML2",  "013"},
+        {"DZ2",  "001a"}, {"DL1",  "008"},  {"MT2",  "015"},  {"DZ3",  "108"},
+        {"MT3",  "020"},  {"NL1",  "017"},  {"MZ1",  "202b"}, {"MT4",  "202c"},
+        {"MZ2",  "202d"}, {"MT5",  "202f"}, {"DT2",  "207"},  {"DL2",  "204"},
+        {"DT1",  "202e"}, {"NZ1",  "244"},  {"DI2",  "201"},  {"NL3",  "218"},
+        {"NZ2",  "303"},  {"NL2",  "210"},  {"DZ4",  "111"},  {"NO1",  "220"},
+        {"DL3",  "212"},  {"DT3",  "305"},  {"NT1",  "211"},  {"NL4",  "209"},
+        {"ML3",  "203"},  {"MZ3",  "205"},  {"MS1",  "302"},  {"MT6",  "316"},
+        {"MT7",  "319"},  {"MS2",  "213"},  {"MZ4",  "223"},  {"NL5",  "120"},
+        {"MT8",  "221"},  {"MT9",  "222"},  {"NT2",  "409"},  {"MJ1",  "300a"},
+        {"NL6",  "401"},  {"NL8",  "414"},  {"DJ4",  "322"},  {"DT4",  "321"},
+        {"NT4",  "407"},  {"NL7",  "310"},  {"NT3",  "215"},  {"DJ5",  "314"},
+        {"NL9",  "239"},  {"NZ3",  "315"},  {"NS1",  "311"},  {"NI1",  "238"},
+        {"MT10", "206"},  {"ML4",  "208"},  {"NI2",  "113"},  {"MI1",  "301"},
+        {"NJ1",  "118"},  {"NI3",  "224"},  {"MO1",  "402"},  {"NT5",  "114"},
+        {"NI4",  "219"},  {"NJ2",  "416"},  {"NZ4",  "312"},  {"NS2",  "417"},
+        {"NZ5",  "418"},  {"NO2",  "403"},  {"NT6",  "217"},  {"NT7",  "229"},
+        {"NO3",  "225"},  {"NZ6",  "318"},  {"NJ3",  "317"},  {"NT9",  "408"},
+        {"NS3",  "405"},  {"NI5",  "313"},  {"NT8",  "216"},  {"NO4",  "232"},
+        {"NO5",  "309"},  {"NT10", "404"},  {"NI6",  "328"},  {"NO6",  "234"},
+        {"NS4",  "112"},  {"NJ4",  "226"},  {"NT12", "233"},  {"NT11", "227"},
+        {"NL10", "308"},  {"NO7",  "230"},
+        // Bonus puzzles (E-type)
+        {"EL1",  "S119"}, {"ES1",  "S117"}, {"ES3",  "S115"}, {"EL2",  "S214"},
+        {"EL3",  "S411"}, {"ES2",  "S306"}, {"EL4",  "S235"}, {"EO1",  "S320"},
+        {"ES4",  "S504"},
+    };
+    return map;
+}
+
+// ============================================================
+// EnforcePuzzleSolvedState — mark checked puzzle locations as solved for signs
+// Uses BoolSet("Puzzle::<id>", true) directly on UTalosProgress.
+// ============================================================
+
+void InventorySync::EnforcePuzzleSolvedState(ModState& state, const ItemMapping& /*itemMapping*/)
+{
+    if (!state.CurrentProgress) return;
+    if (!state.APSynced) return;
+
+    // Resolve BoolSet UFunction once (cached, same pattern as DoorUnlockHandler)
+    if (!s_fnPuzzleResolved) {
+        s_fnPuzzleResolved = true;
+        s_fnBoolSet = SEH_StaticFindFunction(STR("/Script/Talos.TalosProgress:BoolSet"));
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] PuzzleSolve: Resolved BoolSet={}\n"),
+            s_fnBoolSet ? STR("ok") : STR("MISS"));
+    }
+
+    if (!s_fnBoolSet) return;
+
+    const auto& puzzleMap = GetTetrominoToPuzzleMap();
+    int solvedCount = 0;
+
+    for (const auto& id : state.CheckedLocations) {
+        // Skip items already processed this session
+        if (s_solvedPuzzleCache.count(id) > 0) continue;
+
+        // Look up the puzzle ID from our static mapping
+        auto it = puzzleMap.find(id);
+        if (it == puzzleMap.end()) {
+            // Not a regular/bonus puzzle location (could be a star "**5", etc.) — skip
+            s_solvedPuzzleCache.insert(id);
+            continue;
+        }
+
+        const std::string& puzzleNum = it->second;
+        std::wstring varName = L"Puzzle::" + std::wstring(puzzleNum.begin(), puzzleNum.end());
+
+        // Call BoolSet(varName, true) on the progress object
+        struct {
+            FString Name;
+            bool    bValue;
+        } params{};
+        params.Name = FString(varName.c_str());
+        params.bValue = true;
+
+        if (SEH_ProcessEvent(state.CurrentProgress, s_fnBoolSet, &params)) {
+            ++solvedCount;
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] PuzzleSolve: {} → {} = true\n"),
+                std::wstring(id.begin(), id.end()), varName);
+        }
+
+        s_solvedPuzzleCache.insert(id);
+    }
+
+    if (solvedCount > 0) {
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] PuzzleSolve: Marked {} puzzles as solved this pass\n"), solvedCount);
     }
 }
 

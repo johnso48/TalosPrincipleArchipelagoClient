@@ -7,7 +7,7 @@
 
 namespace TalosAP {
 
-/// Processes debug key commands (F6 inventory dump, F7 open door arrangers, F9 HUD test).
+/// Processes debug key commands (F6 inventory dump, F7 unlock mechanics, F9 HUD test).
 ///
 /// These blocks are entirely self-contained diagnostic helpers.
 /// Extracting them removes clutter from the main tick loop.
@@ -21,8 +21,6 @@ public:
                         HudNotification* hud);
 
 private:
-    /// F7: Find all door-type arrangers in the level, solve them, and open their doors.
-    void OpenAllDoorArrangers(ModState& state, HudNotification* hud);
 
     /// Diagnostic: dump arranger actor state via Unreal reflection (no hardcoded offsets).
     /// Called before and after SolveArranger to detect state changes that may cause
@@ -35,6 +33,11 @@ private:
     /// to log door/fence/audio state after solve.  Helps identify which actors
     /// hold stale references during level transitions.
     static void DumpRelatedActors();
+
+    /// F6: Dump save-game / progress state for all arrangers in the current level.
+    /// Shows IsArrangerSolved, IsPuzzleSolved, progress variables, and the
+    /// full GetDebugString() output from UTalosProgress.
+    static void DumpSaveGameState(ModState& state);
 };
 
 } // namespace TalosAP

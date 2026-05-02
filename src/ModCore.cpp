@@ -7,6 +7,9 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UObject.hpp>
+#include <Unreal/UClass.hpp>
+#include <Unreal/AActor.hpp>
+#include <Unreal/Hooks.hpp>
 
 #include <filesystem>
 
@@ -14,6 +17,10 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace TalosAP {
+
+// Static pointer to ModState, set during Initialize(), used by
+// construction hooks that cannot capture member variables.
+static ModState* s_modState = nullptr;
 
 // ============================================================
 // Initialize — called once from on_unreal_init
@@ -124,6 +131,40 @@ void ModCore::RegisterHooks(std::atomic<bool>& shuttingDown)
         Output::send<LogLevel::Warning>(STR("[TalosAP] GoalDetectionHandler DISABLED by config\n"));
     }
 
+    // Hook: When a PlayerController is constructed, the world is ready.
+    // Set PendingDoorUnlockEnforce so the next tick writes door-unlock
+    // variables into save data BEFORE the game's BeginPlay scripts read them.
+    s_modState = &m_state;
+    Hook::RegisterStaticConstructObjectPostCallback(
+        [](Hook::TCallbackIterationData<UObject*>& data,
+           const FStaticConstructObjectParameters& params)
+        {
+            UObject* obj = data.GetCurrentResolvedReturnValue();
+            if (!obj) return;
+
+            UClass* cls = obj->GetClassPrivate();
+            if (!cls) return;
+
+            auto className = cls->GetName();
+            if (className.find(STR("TalosController")) == std::wstring::npos
+                && className.find(STR("PlayerController")) == std::wstring::npos) return;
+
+            Output::send<LogLevel::Verbose>(STR("[TalosAP] PlayerController constructed: {} — scheduling door unlock enforcement\n"),
+                obj->GetFullName());
+
+            if (s_modState) {
+                s_modState->PendingDoorUnlockEnforce.store(true);
+                s_modState->PendingMechanicsPatch.store(true);
+            }
+        },
+        {
+            .bReadonly = true,
+            .OwnerModName = STR("TalosPrincipleArchipelago"),
+            .HookName = STR("PlayerControllerConstruct")
+        }
+    );
+    Output::send<LogLevel::Verbose>(STR("[TalosAP] Registered PlayerController construction hook for door unlock\n"));
+
     // Hook: KismetSystemLibrary::QuitGame
     try {
         UObjectGlobals::RegisterHook(
@@ -141,6 +182,9 @@ void ModCore::RegisterHooks(std::atomic<bool>& shuttingDown)
     catch (...) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] Failed to hook QuitGame\n"));
     }
+
+    // Mechanics handler: IsMechanicUnlocked post-hooks
+    m_mechanicsHandler.RegisterHooks(m_state);
 }
 
 // ============================================================
@@ -164,6 +208,9 @@ void ModCore::Tick()
         m_debugCommands.ProcessPending(m_state, *m_itemMapping,
                                        m_visibilityManager, m_hud.get());
     }
+
+    // Mechanic unlock: save-data + RequiredMechanics clearing
+    m_mechanicsHandler.ProcessPending(m_state);
 
     if (m_config.tetromino_handling.scan_for_new_tetrominos) {
         ProcessTetrominoScan();
@@ -242,6 +289,10 @@ bool ModCore::HandleLevelTransitionCooldown()
         m_levelTransitionCooldownWasActive = false;
         Output::send<LogLevel::Verbose>(STR("[TalosAP] Level transition cooldown expired — resuming\n"));
 
+        // Invalidate cached UFunction* pointers for puzzle-solved logic
+        InventorySync::ResetCachedFunctions();
+
+
         // If a DeathLink was deferred because the previous level
         // had no mines, re-trigger it now that we're in a new level.
         if (m_state.PendingDeferredDeathLink && m_state.DeathLinkEnabled) {
@@ -279,7 +330,6 @@ void ModCore::ProcessDeathLinks()
         }
     }
 }
-
 void ModCore::ProcessTetrominoScan()
 {
     if (m_state.NeedsTetrominoScan) {
@@ -321,6 +371,8 @@ void ModCore::EnforceCollectionState()
     if (m_state.CurrentProgress) {
         InventorySync::EnforceCollectionState(m_state, *m_itemMapping);
     }
+    // Mark puzzles as solved so sign-posts show the black X
+    InventorySync::EnforcePuzzleSolvedState(m_state, *m_itemMapping);
 }
 
 void ModCore::TickGoalDetection()
