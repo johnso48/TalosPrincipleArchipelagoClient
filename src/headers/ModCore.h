@@ -8,6 +8,8 @@
 #include "LevelTransitionHandler.h"
 #include "SaveGameHandler.h"
 #include "DeathLinkHandler.h"
+#include "DoorUnlockHandler.h"
+#include "MechanicsHandler.h"
 #include "VisibilityManager.h"
 #include "GoalDetectionHandler.h"
 #include "Throttle.h"
@@ -42,7 +44,6 @@ public:
 
     /// Immediate key-press handlers (called from key-down lambdas).
     void OnKeyF6() { m_state.PendingInventoryDump.store(true); }
-    void OnKeyF7() { m_state.PendingOpenDoorArrangers.store(true); }
     void OnKeyF9() { m_state.PendingHudTest.store(true); }
 
 private:
@@ -73,7 +74,6 @@ private:
     void EnforceCollectionState();
     void TickGoalDetection();
     void CheckGoalCompletion();
-
     // ---- Subsystems ----
     Config                            m_config;
     ModState                          m_state;
@@ -83,6 +83,8 @@ private:
     LevelTransitionHandler            m_levelTransitionHandler;
     SaveGameHandler                   m_saveGameHandler;
     DeathLinkHandler                  m_deathLinkHandler;
+    DoorUnlockHandler                 m_doorUnlockHandler;
+    MechanicsHandler                  m_mechanicsHandler;
     VisibilityManager                 m_visibilityManager;
     GoalDetectionHandler              m_goalDetectionHandler;
     DebugCommands                     m_debugCommands;

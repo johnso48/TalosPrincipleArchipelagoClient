@@ -58,11 +58,30 @@ struct ModState {
     /// Set on level transitions and save loads.
     bool NeedsTetrominoScan = true;
 
+    // ===== Door Arranger Unlock State =====
+
+    /// Set of arranger puzzle IDs (e.g. "DoorTutorial", "DoorRome") that
+    /// should be unlocked in save data.  Populated by AP or config.
+    /// The construction hook + tick will ensure these are set in progress.
+    std::unordered_set<std::string> UnlockedDoors;
+
+    /// When true, the door unlock enforcement should run on the next tick.
+    /// Set when a PlayerController is constructed (world is ready).
+    std::atomic<bool> PendingDoorUnlockEnforce = false;
+
     /// Set by the F6 key handler; cleared after DumpCollectedTetrominos fires.
     std::atomic<bool> PendingInventoryDump = false;
 
-    /// Set by the F7 key handler; cleared after door arrangers are opened.
-    std::atomic<bool> PendingOpenDoorArrangers = false;
+    // ===== Mechanic Unlock Patch State =====
+    // When true, the next tick scans all CarriableComponent instances and
+    // zeroes RequiredMechanics so items are usable regardless of mechanic
+    // unlock state.  Set by construction hook + AP item grants.
+    std::atomic<bool> PendingMechanicsPatch = false;
+
+    // EPuzzleMechanic bitmask: Time=1 Cube=2 Fan=4 Rod=8 Platform=16
+    // Tracks which mechanics the player should have unlocked.
+    // Set by AP item grants.
+    std::atomic<uint8_t> UnlockedMechanicsMask = 0;
 
     /// Set by the F9 key handler; cleared after test notifications are queued.
     std::atomic<bool> PendingHudTest = false;

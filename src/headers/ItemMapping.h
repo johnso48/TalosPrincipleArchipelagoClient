@@ -8,6 +8,14 @@
 
 namespace TalosAP {
 
+/// Categorisation of AP item IDs.
+enum class ItemCategory {
+    Tetromino,   ///< Standard tetromino / sigil / star / bonus puzzle
+    Mechanic,    ///< Puzzle-mechanic unlock (Connector, Hexahedron, etc.)
+    Gate,        ///< World gate unlock (A1, A, B, C)
+    Unknown,     ///< Unrecognised item
+};
+
 /// Maps between Archipelago item/location IDs and in-game tetromino IDs.
 ///
 /// AP uses 19 item types (one per shape+color combo). Each type maps to a
@@ -20,7 +28,34 @@ public:
     static constexpr int64_t BASE_ITEM_ID     = 0x540000; // 5505024
     static constexpr int64_t BASE_LOCATION_ID = 0x540000; // 5505024
 
+    // New special item IDs
+    static constexpr int64_t ITEM_CONNECTOR   = 0x54001C; // Rod mechanic
+    static constexpr int64_t ITEM_HEXAHEDRON  = 0x54001D; // Cube mechanic
+    static constexpr int64_t ITEM_FANS        = 0x54001E; // Fan mechanic
+    static constexpr int64_t ITEM_PLAYBACK    = 0x54001F; // Time mechanic
+    static constexpr int64_t ITEM_PLATFORM    = 0x540020; // Platform mechanic
+    static constexpr int64_t ITEM_GATE_A1     = 0x540021; // World A1 Gate
+    static constexpr int64_t ITEM_GATE_A      = 0x540022; // World A Gate
+    static constexpr int64_t ITEM_GATE_B      = 0x540023; // World B Gate
+    static constexpr int64_t ITEM_GATE_C      = 0x540024; // World C Gate
+
     ItemMapping();
+
+    /// Classify an AP item ID into Tetromino / Mechanic / Gate / Unknown.
+    ItemCategory ClassifyItem(int64_t apItemId) const;
+
+    /// For a Mechanic item, return the EPuzzleMechanic bitmask value.
+    /// Returns 0 if the item is not a mechanic.
+    uint8_t GetMechanicBit(int64_t apItemId) const;
+
+    /// For a Gate item, return the internal door arranger ID
+    /// (e.g. "DoorTutorial"). Returns empty if not a gate item.
+    std::string GetGateDoorId(int64_t apItemId) const;
+
+    /// For a Gate item, return the Door-type tetromino pieces required
+    /// to solve that gate's arranger. Each pair is {AP_item_id, count}.
+    /// The AP item IDs correspond to Green (Door) tetromino types.
+    std::vector<std::pair<int64_t, int>> GetGateRequiredPieces(int64_t apItemId) const;
 
     /// Resolve the next concrete tetromino for a received AP item.
     /// Increments per-prefix counter. Returns empty if exhausted/unknown.
@@ -71,6 +106,9 @@ public:
 private:
     /// AP item ID → prefix (e.g. 0x540000 → "DJ")
     std::unordered_map<int64_t, std::string> m_apItemIdToPrefix;
+
+    /// Display names for special (non-tetromino) items (mechanic unlocks, gates)
+    std::unordered_map<int64_t, std::string> m_specialItemDisplayNames;
 
     /// Prefix → display name (e.g. "DJ" → "Green J")
     std::unordered_map<std::string, std::string> m_prefixDisplayNames;

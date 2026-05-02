@@ -262,19 +262,16 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
         Output::send<LogLevel::Verbose>(STR("[TalosAP] Received {} items\n"), items.size());
 
         int grantedCount = 0;
-        int nonTetrominoCount = 0;
+        int mechanicCount = 0;
+        int gateCount = 0;
+        int otherCount = 0;
 
         for (const auto& item : items) {
-            auto tetId = m_itemMapping->ResolveNextItem(item.item);
+            auto category = m_itemMapping->ClassifyItem(item.item);
 
             // Resolve display name: prefer our local mapping, fall back to AP data package
-            std::string displayName;
-            if (tetId.has_value()) {
-                displayName = m_itemMapping->GetDisplayName(item.item);
-                if (displayName.empty()) displayName = tetId.value();
-            }
+            std::string displayName = m_itemMapping->GetDisplayName(item.item);
             if (displayName.empty() && m_impl && m_impl->ap) {
-                // Use AP library to look up item name from the data package
                 try {
                     std::string game = m_impl->ap->get_player_game(m_impl->ap->get_player_number());
                     displayName = m_impl->ap->get_item_name(item.item, game);
@@ -285,19 +282,60 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
                 displayName = "Item #" + std::to_string(item.item);
             }
 
-            if (tetId.has_value()) {
-                // Grant the tetromino — add to GrantedItems set.
-                m_state->GrantedItems.insert(tetId.value());
-                ++grantedCount;
-            } else {
-                // Non-tetromino item (e.g. trap, filler, progression unlock)
-                ++nonTetrominoCount;
-                Output::send<LogLevel::Verbose>(STR("[TalosAP] Non-tetromino item received: {} (0x{:X}) = {}\n"),
-                    item.item, item.item,
-                    std::wstring(displayName.begin(), displayName.end()));
+            switch (category) {
+                case TalosAP::ItemCategory::Tetromino: {
+                    auto tetId = m_itemMapping->ResolveNextItem(item.item);
+                    if (tetId.has_value()) {
+                        m_state->GrantedItems.insert(tetId.value());
+                        ++grantedCount;
+                    }
+                    break;
+                }
+                case TalosAP::ItemCategory::Mechanic: {
+                    uint8_t bit = m_itemMapping->GetMechanicBit(item.item);
+                    if (bit != 0) {
+                        m_state->UnlockedMechanicsMask.fetch_or(bit);
+                        m_state->PendingMechanicsPatch.store(true);
+                        ++mechanicCount;
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP] Mechanic unlocked: {} (bit 0x{:02X}, mask now 0x{:02X})\n"),
+                            std::wstring(displayName.begin(), displayName.end()),
+                            bit, m_state->UnlockedMechanicsMask.load());
+                    }
+                    break;
+                }
+                case TalosAP::ItemCategory::Gate: {
+                    std::string doorId = m_itemMapping->GetGateDoorId(item.item);
+                    if (!doorId.empty()) {
+                        // Grant the Door-type tetromino pieces needed for this gate
+                        auto pieces = m_itemMapping->GetGateRequiredPieces(item.item);
+                        int piecesGranted = 0;
+                        for (const auto& [pieceApId, count] : pieces) {
+                            for (int i = 0; i < count; ++i) {
+                                auto tetId = m_itemMapping->ResolveNextItem(pieceApId);
+                                if (tetId.has_value()) {
+                                    m_state->GrantedItems.insert(tetId.value());
+                                    ++piecesGranted;
+                                }
+                            }
+                        }
+                        gateCount += piecesGranted;
+                        Output::send<LogLevel::Verbose>(STR("[TalosAP] Gate unlocked: {} -> {} (granted {} tetromino pieces)\n"),
+                            std::wstring(displayName.begin(), displayName.end()),
+                            std::wstring(doorId.begin(), doorId.end()),
+                            piecesGranted);
+                    }
+                    break;
+                }
+                default: {
+                    ++otherCount;
+                    Output::send<LogLevel::Verbose>(STR("[TalosAP] Unknown item received: {} (0x{:X}) = {}\n"),
+                        item.item, item.item,
+                        std::wstring(displayName.begin(), displayName.end()));
+                    break;
+                }
             }
 
-            // Notifications are shown for ALL items, not just tetrominoes
+            // Notifications are shown for ALL items
             bool isSelf = (item.player == m_playerSlot);
             if (!isSelf) {
                 std::string senderName = GetPlayerName(item.player);
@@ -332,8 +370,8 @@ bool APClientWrapper::Init(const Config& config, ModState& state, ItemMapping& i
             }
         }
 
-        Output::send<LogLevel::Verbose>(STR("[TalosAP] Processed items: {} tetrominoes, {} other\n"),
-            grantedCount, nonTetrominoCount);
+        Output::send<LogLevel::Verbose>(STR("[TalosAP] Processed items: {} tetrominoes, {} mechanics, {} gates, {} other\n"),
+            grantedCount, mechanicCount, gateCount, otherCount);
 
         // Ensure APSynced is set
         m_state->APSynced = true;

@@ -4,6 +4,7 @@
 #include "ItemMapping.h"
 
 #include <string>
+#include <unordered_set>
 
 namespace TalosAP {
 
@@ -38,6 +39,20 @@ public:
 
     /// Dump current TMap contents to the log for debugging.
     static void DumpCollectedTetrominos(ModState& state, const ItemMapping& itemMapping);
+
+    /// Enforce puzzle-solved state: for each checked location, call
+    /// BoolSet("Puzzle::<id>", true) on UTalosProgress so that sign
+    /// posts show the black X mark. Uses a hardcoded mapping from
+    /// BotPuzzleDatabase.csv to resolve tetromino → puzzle ID.
+    static void EnforcePuzzleSolvedState(ModState& state, const ItemMapping& itemMapping);
+
+    /// Reset cached UFunction pointers (call on level transition).
+    static void ResetCachedFunctions();
+
+private:
+    /// Set of checked-location tetromino IDs already marked as solved this session.
+    /// Avoids redundant BoolSet calls every enforcement tick.
+    static std::unordered_set<std::string> s_solvedPuzzleCache;
 };
 
 } // namespace TalosAP

@@ -165,6 +165,19 @@ ItemMapping::ItemMapping()
         {"EO", "White O"},
     };
 
+    // Display names for special (non-tetromino) items
+    m_specialItemDisplayNames = {
+        {ITEM_CONNECTOR,  "Connector"},
+        {ITEM_HEXAHEDRON, "Hexahedron"},
+        {ITEM_FANS,       "Fans"},
+        {ITEM_PLAYBACK,   "Playback"},
+        {ITEM_PLATFORM,   "Platform"},
+        {ITEM_GATE_A1,    "World A1 Gate"},
+        {ITEM_GATE_A,     "World A Gate"},
+        {ITEM_GATE_B,     "World B Gate"},
+        {ITEM_GATE_C,     "World C Gate"},
+    };
+
     BuildTables();
 }
 
@@ -312,6 +325,65 @@ void ItemMapping::ResetItemCounters()
 }
 
 // ============================================================
+// Item classification
+// ============================================================
+
+ItemCategory ItemMapping::ClassifyItem(int64_t apItemId) const
+{
+    // Tetromino items are in m_apItemIdToPrefix
+    if (m_apItemIdToPrefix.count(apItemId)) return ItemCategory::Tetromino;
+
+    // Mechanic unlocks: 0x54001C - 0x540020
+    if (apItemId >= ITEM_CONNECTOR && apItemId <= ITEM_PLATFORM) return ItemCategory::Mechanic;
+
+    // Gate unlocks: 0x540021 - 0x540024
+    if (apItemId >= ITEM_GATE_A1 && apItemId <= ITEM_GATE_C) return ItemCategory::Gate;
+
+    return ItemCategory::Unknown;
+}
+
+uint8_t ItemMapping::GetMechanicBit(int64_t apItemId) const
+{
+    // EPuzzleMechanic: Time=1 Cube=2 Fan=4 Rod=8 Platform=16
+    switch (apItemId) {
+        case ITEM_CONNECTOR:  return 0x08; // Rod
+        case ITEM_HEXAHEDRON: return 0x02; // Cube
+        case ITEM_FANS:       return 0x04; // Fan
+        case ITEM_PLAYBACK:   return 0x01; // Time
+        case ITEM_PLATFORM:   return 0x10; // Platform
+        default:              return 0;
+    }
+}
+
+std::string ItemMapping::GetGateDoorId(int64_t apItemId) const
+{
+    switch (apItemId) {
+        case ITEM_GATE_A1: return "DoorTutorial";
+        case ITEM_GATE_A:  return "DoorRome";
+        case ITEM_GATE_B:  return "DoorEgypt";
+        case ITEM_GATE_C:  return "DoorMedieval";
+        default:           return "";
+    }
+}
+
+std::vector<std::pair<int64_t, int>> ItemMapping::GetGateRequiredPieces(int64_t apItemId) const
+{
+    // Door-type AP item IDs:  DJ=0x540000  DZ=0x540001  DI=0x540002  DL=0x540003  DT=0x540004
+    switch (apItemId) {
+        case ITEM_GATE_A1: // DoorTutorial: J=2, Z=1
+            return {{0x540000, 2}, {0x540001, 1}};
+        case ITEM_GATE_A:  // DoorRome: J=1, Z=1, I=1, L=1
+            return {{0x540000, 1}, {0x540001, 1}, {0x540002, 1}, {0x540003, 1}};
+        case ITEM_GATE_B:  // DoorEgypt: T=2, Z=1, I=1, L=1
+            return {{0x540004, 2}, {0x540001, 1}, {0x540002, 1}, {0x540003, 1}};
+        case ITEM_GATE_C:  // DoorMedieval: T=2, J=2, L=1, Z=1
+            return {{0x540004, 2}, {0x540000, 2}, {0x540003, 1}, {0x540001, 1}};
+        default:
+            return {};
+    }
+}
+
+// ============================================================
 // Location queries
 // ============================================================
 
@@ -329,10 +401,16 @@ std::string ItemMapping::GetLocationName(int64_t locationId) const
 
 std::string ItemMapping::GetDisplayName(int64_t apItemId) const
 {
+    // Check tetromino prefix display names first
     auto it = m_apItemIdToPrefix.find(apItemId);
-    if (it == m_apItemIdToPrefix.end()) return "";
-    auto nameIt = m_prefixDisplayNames.find(it->second);
-    return (nameIt != m_prefixDisplayNames.end()) ? nameIt->second : "";
+    if (it != m_apItemIdToPrefix.end()) {
+        auto nameIt = m_prefixDisplayNames.find(it->second);
+        if (nameIt != m_prefixDisplayNames.end()) return nameIt->second;
+    }
+    // Check special items (mechanics, gates)
+    auto specIt = m_specialItemDisplayNames.find(apItemId);
+    if (specIt != m_specialItemDisplayNames.end()) return specIt->second;
+    return "";
 }
 
 std::string ItemMapping::GetDisplayNameForTetromino(const std::string& tetrominoId) const
