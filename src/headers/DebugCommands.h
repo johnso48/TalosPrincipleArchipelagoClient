@@ -7,7 +7,7 @@
 
 namespace TalosAP {
 
-/// Processes debug key commands (F6 inventory dump, F7 unlock mechanics, F9 HUD test).
+/// Processes debug key commands (F6 inventory dump, F9 HUD test).
 ///
 /// These blocks are entirely self-contained diagnostic helpers.
 /// Extracting them removes clutter from the main tick loop.

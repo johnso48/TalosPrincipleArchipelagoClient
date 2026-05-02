@@ -72,18 +72,15 @@ struct ModState {
     /// Set by the F6 key handler; cleared after DumpCollectedTetrominos fires.
     std::atomic<bool> PendingInventoryDump = false;
 
-    /// Set by the F7 key handler; cleared after mechanic unlocks are written.
-    std::atomic<bool> PendingUnlockMechanics = false;
-
     // ===== Mechanic Unlock Patch State =====
     // When true, the next tick scans all CarriableComponent instances and
     // zeroes RequiredMechanics so items are usable regardless of mechanic
-    // unlock state.  Set by construction hook + F7.
+    // unlock state.  Set by construction hook + AP item grants.
     std::atomic<bool> PendingMechanicsPatch = false;
 
     // EPuzzleMechanic bitmask: Time=1 Cube=2 Fan=4 Rod=8 Platform=16
     // Tracks which mechanics the player should have unlocked.
-    // Set by AP item grants or debug commands (F7 = Rod).
+    // Set by AP item grants.
     std::atomic<uint8_t> UnlockedMechanicsMask = 0;
 
     /// Set by the F9 key handler; cleared after test notifications are queued.

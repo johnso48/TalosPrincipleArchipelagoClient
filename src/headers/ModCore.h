@@ -44,13 +44,6 @@ public:
 
     /// Immediate key-press handlers (called from key-down lambdas).
     void OnKeyF6() { m_state.PendingInventoryDump.store(true); }
-    void OnKeyF7() {
-        // Debug: unlock Rods (0x08) and trigger mechanic patch
-        m_state.UnlockedMechanicsMask.fetch_or(0x08);
-        m_state.PendingMechanicsPatch.store(true);
-        RC::Output::send<RC::LogLevel::Verbose>(STR("[TalosAP] F7: Unlocking Rods (mask now 0x{:02X})\n"),
-            m_state.UnlockedMechanicsMask.load());
-    }
     void OnKeyF9() { m_state.PendingHudTest.store(true); }
 
 private:
