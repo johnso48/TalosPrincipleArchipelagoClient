@@ -182,9 +182,6 @@ void ModCore::RegisterHooks(std::atomic<bool>& shuttingDown)
     catch (...) {
         Output::send<LogLevel::Warning>(STR("[TalosAP] Failed to hook QuitGame\n"));
     }
-
-    // Mechanics handler: IsMechanicUnlocked post-hooks
-    m_mechanicsHandler.RegisterHooks(m_state);
 }
 
 // ============================================================

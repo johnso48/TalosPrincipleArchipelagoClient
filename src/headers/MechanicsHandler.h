@@ -23,9 +23,6 @@ namespace TalosAP {
 /// to fix the puzzle-entry HUD red flash.
 class MechanicsHandler {
 public:
-    /// Register IsMechanicUnlocked post-hooks. Must be called after
-    /// Unreal is initialised (i.e. inside on_unreal_init).
-    void RegisterHooks(ModState& state);
 
     /// Process a pending mechanics patch on the game thread.
     /// Called every tick from ModCore::Tick().
